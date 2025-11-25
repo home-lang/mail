@@ -89,6 +89,16 @@ pub const Server = struct {
     }
 
     pub fn start(self: *Server, shutdown_flag: *std.atomic.Value(bool)) !void {
+        return self.startWithReload(shutdown_flag, null, null);
+    }
+
+    /// Start server with optional hot reload support
+    pub fn startWithReload(
+        self: *Server,
+        shutdown_flag: *std.atomic.Value(bool),
+        reload_flag: ?*std.atomic.Value(bool),
+        reload_callback: ?*const fn () void,
+    ) !void {
         const address = try net.Address.parseIp(self.config.host, self.config.port);
 
         self.listener = try address.listen(.{
@@ -100,6 +110,17 @@ pub const Server = struct {
         self.logger.info("SMTP Server listening on {s}:{d}", .{ self.config.host, self.config.port });
 
         while (self.running and !shutdown_flag.load(.acquire)) {
+            // Check for configuration reload
+            if (reload_flag) |flag| {
+                if (flag.load(.acquire)) {
+                    flag.store(false, .release);
+                    self.logger.info("Configuration reload signal received", .{});
+                    if (reload_callback) |callback| {
+                        callback();
+                    }
+                }
+            }
+
             // Accept with timeout to allow checking shutdown flag
             const connection = self.listener.?.accept() catch |err| {
                 if (err == error.OperationCancelled or err == error.WouldBlock) {

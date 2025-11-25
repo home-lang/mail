@@ -13,12 +13,22 @@ const multitenancy = @import("features/multitenancy.zig");
 const metrics_mod = @import("observability/metrics.zig");
 const alerting = @import("observability/alerting.zig");
 const secrets = @import("security/secrets.zig");
+const hot_reload = @import("core/hot_reload.zig");
 
 // Global shutdown flag
 var shutdown_requested = std.atomic.Value(bool).init(false);
 
 // Global reload flag for SIGHUP
 var reload_requested = std.atomic.Value(bool).init(false);
+
+// Global reload manager pointer for callback
+var global_reload_manager: ?*hot_reload.HotReloadManager = null;
+
+fn reloadConfigCallback() void {
+    if (global_reload_manager) |manager| {
+        _ = manager.checkAndReload(&reload_requested);
+    }
+}
 
 fn signalHandler(sig: i32) callconv(.c) void {
     _ = sig;
@@ -58,7 +68,8 @@ pub fn main() !void {
 
     // Load configuration first (with CLI args and env vars)
     // Configuration validation is automatically performed during loading
-    const cfg = config.loadConfig(allocator, cli_args) catch |err| {
+    // Using var to allow hot reload to update configuration
+    var cfg = config.loadConfig(allocator, cli_args) catch |err| {
         std.debug.print("Configuration validation failed: {}\n", .{err});
         return err;
     };
@@ -108,6 +119,13 @@ pub fn main() !void {
     std.posix.sigaction(std.posix.SIG.HUP, &reload_act, null);
 
     log.info("Signal handlers installed (SIGINT, SIGTERM for shutdown, SIGHUP for reload)", .{});
+
+    // Initialize hot reload manager
+    var reload_manager = hot_reload.HotReloadManager.init(allocator, &cfg, cli_args.config_file);
+    defer reload_manager.deinit();
+    global_reload_manager = &reload_manager;
+    defer global_reload_manager = null;
+    log.info("Hot reload manager initialized (send SIGHUP to reload configuration)", .{});
 
     // Initialize database and auth backend if auth is enabled
     var db: ?database.Database = null;
@@ -264,7 +282,7 @@ pub fn main() !void {
     log.info("  Metrics: {}", .{smtp_metrics != null});
     log.info("  Alerting: {}", .{alert_manager != null});
 
-    server.start(&shutdown_requested) catch |err| {
+    server.startWithReload(&shutdown_requested, &reload_requested, reloadConfigCallback) catch |err| {
         log.critical("Server error: {}", .{err});
         return err;
     };

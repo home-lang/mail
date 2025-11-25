@@ -405,17 +405,23 @@ See [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md) for detailed release docu
 - [x] IPv6 support
 - [x] SMTP relay configuration
 - [x] Bounce handling
+- [x] Raft consensus for cluster mode
+- [x] Cluster mode integration
+- [x] Multi-tenancy support
+- [x] Secret management integration (Vault, K8s Secrets, AWS, Azure)
+- [x] Application metrics (StatsD integration)
+- [x] Alerting integration (Slack, PagerDuty, OpsGenie, webhooks)
 
 ### In Progress 🚧
 - [ ] Full TLS/STARTTLS implementation (98% complete - cipher negotiation issue remains)
 - [ ] io_uring integration for Linux (framework exists)
-- [ ] Raft consensus for cluster mode
+
+### Recently Completed 🎉
+- [x] TOML configuration file support
+- [x] Hot configuration reload (SIGHUP)
+- [x] Distributed tracing exporters (Jaeger, DataDog, Zipkin, OTLP)
 
 ### Planned 📋
-- [ ] TOML/YAML configuration file support
-- [ ] Hot configuration reload (SIGHUP)
-- [ ] Secret management integration (Vault, K8s Secrets)
-- [ ] Distributed tracing exporters (Jaeger, DataDog, Zipkin)
 - [ ] IMAP server integration
 - [ ] POP3 server integration
 - [ ] WebSocket real-time notifications

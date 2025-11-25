@@ -501,13 +501,202 @@ pub const BatchSpanExporter = struct {
         }
     }
 
-    /// Send HTTP POST request
+    /// Send HTTP POST request using std.http.Client
     fn sendHttpPost(self: *BatchSpanExporter, url: []const u8, payload: []const u8, content_type: []const u8) !void {
-        _ = content_type;
-        // Simplified HTTP client
-        // Production would use proper HTTP client library
-        logger.debug("[{s}] HTTP POST to {s} with {d} bytes", .{ self.config.service_name, url, payload.len });
+        const uri = std.Uri.parse(url) catch |err| {
+            logger.err("Failed to parse URL {s}: {}", .{ url, err });
+            return error.InvalidUrl;
+        };
+
+        var client = std.http.Client{ .allocator = self.allocator };
+        defer client.deinit();
+
+        var header_buf: [4096]u8 = undefined;
+        var req = client.open(.POST, uri, .{
+            .server_header_buffer = &header_buf,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = content_type },
+            },
+        }) catch |err| {
+            logger.err("Failed to open HTTP connection to {s}: {}", .{ url, err });
+            return err;
+        };
+        defer req.deinit();
+
+        req.transfer_encoding = .{ .content_length = payload.len };
+
+        req.send() catch |err| {
+            logger.err("Failed to send HTTP request headers: {}", .{err});
+            return err;
+        };
+
+        req.writer().writeAll(payload) catch |err| {
+            logger.err("Failed to write HTTP request body: {}", .{err});
+            return err;
+        };
+
+        req.finish() catch |err| {
+            logger.err("Failed to finish HTTP request: {}", .{err});
+            return err;
+        };
+
+        req.wait() catch |err| {
+            logger.err("Failed to wait for HTTP response: {}", .{err});
+            return err;
+        };
+
+        if (req.status != .ok and req.status != .accepted and req.status != .no_content) {
+            logger.err("HTTP request failed with status: {}", .{req.status});
+            return error.HttpRequestFailed;
+        }
+
+        logger.debug("[{s}] HTTP POST to {s} succeeded ({d} bytes)", .{ self.config.service_name, url, payload.len });
     }
+};
+
+/// Tracer Provider - manages tracers and exporters
+pub const TracerProvider = struct {
+    allocator: std.mem.Allocator,
+    service_name: []const u8,
+    exporter: ?*BatchSpanExporter,
+    sampling_config: SamplingConfig,
+    resource_attributes: std.StringHashMap([]const u8),
+    enabled: bool,
+
+    pub fn init(allocator: std.mem.Allocator, service_name: []const u8) TracerProvider {
+        return .{
+            .allocator = allocator,
+            .service_name = service_name,
+            .exporter = null,
+            .sampling_config = .{},
+            .resource_attributes = std.StringHashMap([]const u8).init(allocator),
+            .enabled = true,
+        };
+    }
+
+    pub fn deinit(self: *TracerProvider) void {
+        if (self.exporter) |exp| {
+            exp.deinit();
+            self.allocator.destroy(exp);
+        }
+
+        var attr_iter = self.resource_attributes.iterator();
+        while (attr_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.resource_attributes.deinit();
+    }
+
+    pub fn setExporter(self: *TracerProvider, config: ExporterConfig) !void {
+        if (self.exporter) |exp| {
+            exp.deinit();
+            self.allocator.destroy(exp);
+        }
+
+        const exporter = try self.allocator.create(BatchSpanExporter);
+        exporter.* = BatchSpanExporter.init(self.allocator, config);
+        try exporter.start();
+        self.exporter = exporter;
+    }
+
+    pub fn setSampling(self: *TracerProvider, config: SamplingConfig) void {
+        self.sampling_config = config;
+    }
+
+    pub fn setResourceAttribute(self: *TracerProvider, key: []const u8, value: []const u8) !void {
+        const key_copy = try self.allocator.dupe(u8, key);
+        const value_copy = try self.allocator.dupe(u8, value);
+        try self.resource_attributes.put(key_copy, value_copy);
+    }
+
+    pub fn createSpan(self: *TracerProvider, name: []const u8) !?*SpanData {
+        if (!self.enabled) return null;
+
+        var span = try self.allocator.create(SpanData);
+        span.* = try SpanData.init(self.allocator, name);
+
+        // Generate IDs
+        std.crypto.random.bytes(&span.trace_id);
+        std.crypto.random.bytes(&span.span_id);
+
+        // Check sampling
+        if (!self.sampling_config.shouldSample(span.trace_id)) {
+            self.allocator.destroy(span);
+            return null;
+        }
+
+        return span;
+    }
+
+    pub fn createChildSpan(self: *TracerProvider, name: []const u8, parent: *const SpanData) !?*SpanData {
+        if (!self.enabled) return null;
+
+        var span = try self.allocator.create(SpanData);
+        span.* = try SpanData.init(self.allocator, name);
+
+        // Inherit trace ID from parent
+        span.trace_id = parent.trace_id;
+        std.crypto.random.bytes(&span.span_id);
+        span.parent_span_id = parent.span_id;
+
+        return span;
+    }
+
+    pub fn endSpan(self: *TracerProvider, span: *SpanData) void {
+        span.finish();
+
+        if (self.exporter) |exp| {
+            // Clone span data for async export
+            exp.exportSpan(span.*) catch |err| {
+                logger.err("Failed to export span: {}", .{err});
+            };
+        }
+
+        span.deinit(self.allocator);
+        self.allocator.destroy(span);
+    }
+
+    pub fn shutdown(self: *TracerProvider) void {
+        if (self.exporter) |exp| {
+            exp.stop();
+        }
+        self.enabled = false;
+    }
+};
+
+/// SMTP-specific span names and attributes
+pub const SmtpSpans = struct {
+    // Span names
+    pub const CONNECTION = "smtp.connection";
+    pub const COMMAND = "smtp.command";
+    pub const AUTHENTICATION = "smtp.auth";
+    pub const MESSAGE_RECEIVE = "smtp.message.receive";
+    pub const MESSAGE_DELIVER = "smtp.message.deliver";
+    pub const DNS_LOOKUP = "smtp.dns.lookup";
+    pub const TLS_HANDSHAKE = "smtp.tls.handshake";
+    pub const SPAM_CHECK = "smtp.spam.check";
+    pub const DKIM_VERIFY = "smtp.dkim.verify";
+    pub const SPF_CHECK = "smtp.spf.check";
+
+    // Attribute keys
+    pub const ATTR_CLIENT_IP = "smtp.client.ip";
+    pub const ATTR_CLIENT_PORT = "smtp.client.port";
+    pub const ATTR_COMMAND = "smtp.command.name";
+    pub const ATTR_RESPONSE_CODE = "smtp.response.code";
+    pub const ATTR_MESSAGE_ID = "smtp.message.id";
+    pub const ATTR_FROM = "smtp.mail.from";
+    pub const ATTR_TO = "smtp.rcpt.to";
+    pub const ATTR_MESSAGE_SIZE = "smtp.message.size";
+    pub const ATTR_AUTH_METHOD = "smtp.auth.method";
+    pub const ATTR_AUTH_SUCCESS = "smtp.auth.success";
+    pub const ATTR_TLS_VERSION = "smtp.tls.version";
+    pub const ATTR_TLS_CIPHER = "smtp.tls.cipher";
+    pub const ATTR_SPAM_SCORE = "smtp.spam.score";
+    pub const ATTR_DKIM_RESULT = "smtp.dkim.result";
+    pub const ATTR_SPF_RESULT = "smtp.spf.result";
+    pub const ATTR_QUEUE_ID = "smtp.queue.id";
+    pub const ATTR_DELIVERY_STATUS = "smtp.delivery.status";
 };
 
 // Tests
