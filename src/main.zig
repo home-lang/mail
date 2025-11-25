@@ -7,6 +7,13 @@ const database = @import("storage/database.zig");
 const auth = @import("auth/auth.zig");
 const greylist_mod = @import("antispam/greylist.zig");
 
+// Cluster and multi-tenancy support
+const cluster = @import("infrastructure/cluster.zig");
+const multitenancy = @import("features/multitenancy.zig");
+const metrics_mod = @import("observability/metrics.zig");
+const alerting = @import("observability/alerting.zig");
+const secrets = @import("security/secrets.zig");
+
 // Global shutdown flag
 var shutdown_requested = std.atomic.Value(bool).init(false);
 
@@ -138,16 +145,135 @@ pub fn main() !void {
 
     defer if (greylist) |*g| g.deinit();
 
+    // Initialize metrics collection
+    var smtp_metrics: ?metrics_mod.SmtpMetrics = null;
+    const statsd_host = std.posix.getenv("STATSD_HOST");
+    const statsd_port: u16 = blk: {
+        const port_str = std.posix.getenv("STATSD_PORT") orelse "8125";
+        break :blk std.fmt.parseInt(u16, port_str, 10) catch 8125;
+    };
+
+    if (statsd_host != null or std.posix.getenv("SMTP_METRICS_ENABLED") != null) {
+        smtp_metrics = try metrics_mod.SmtpMetrics.init(allocator, statsd_host, statsd_port, "smtp");
+        log.info("Metrics collection enabled (StatsD: {s}:{d})", .{ statsd_host orelse "local-only", statsd_port });
+    }
+    defer if (smtp_metrics) |*m| m.deinit();
+
+    // Initialize alerting
+    var alert_manager: ?alerting.AlertManager = null;
+    if (std.posix.getenv("SMTP_ALERTING_ENABLED") != null) {
+        alert_manager = alerting.AlertManager.init(allocator);
+
+        // Configure Slack if webhook URL is provided
+        if (std.posix.getenv("SLACK_WEBHOOK_URL")) |webhook_url| {
+            try alert_manager.?.addSlackChannel(.{
+                .webhook_url = webhook_url,
+                .channel = std.posix.getenv("SLACK_CHANNEL"),
+            });
+            log.info("Slack alerting enabled", .{});
+        }
+
+        // Add default alert rules
+        var default_rules = try alerting.createDefaultRules(allocator);
+        defer default_rules.deinit();
+        for (default_rules.items) |rule| {
+            try alert_manager.?.addRule(rule);
+        }
+
+        log.info("Alerting enabled with {d} default rules", .{alert_manager.?.rules.items.len});
+    }
+    defer if (alert_manager) |*a| a.deinit();
+
+    // Initialize secret manager
+    var secret_manager: ?secrets.SecretManager = null;
+    const secret_backend_str = std.posix.getenv("SECRET_BACKEND") orelse "environment";
+    if (!std.mem.eql(u8, secret_backend_str, "none")) {
+        secret_manager = secrets.SecretManager.init(allocator, .environment);
+
+        if (std.mem.eql(u8, secret_backend_str, "kubernetes")) {
+            secret_manager.?.configureKubernetes(.{
+                .secrets_path = std.posix.getenv("K8S_SECRETS_PATH") orelse "/var/run/secrets",
+            });
+        } else if (std.mem.eql(u8, secret_backend_str, "vault")) {
+            if (std.posix.getenv("VAULT_ADDR")) |vault_addr| {
+                try secret_manager.?.configureVault(.{
+                    .address = vault_addr,
+                    .token = std.posix.getenv("VAULT_TOKEN"),
+                });
+            }
+        }
+
+        log.info("Secret management enabled (backend: {s})", .{secret_backend_str});
+    }
+    defer if (secret_manager) |*s| s.deinit();
+
+    // Initialize cluster mode if enabled
+    var cluster_manager: ?*cluster.ClusterManager = null;
+    const enable_cluster = std.posix.getenv("SMTP_CLUSTER_ENABLED") != null;
+
+    if (enable_cluster) {
+        const node_id = std.posix.getenv("SMTP_NODE_ID") orelse "node-1";
+        const cluster_port: u16 = blk: {
+            const port_str = std.posix.getenv("SMTP_CLUSTER_PORT") orelse "9000";
+            break :blk std.fmt.parseInt(u16, port_str, 10) catch 9000;
+        };
+        const enable_raft = std.posix.getenv("SMTP_RAFT_DISABLED") == null;
+
+        const cluster_config = cluster.ClusterConfig{
+            .node_id = node_id,
+            .bind_address = cfg.host,
+            .bind_port = cluster_port,
+            .peers = &[_][]const u8{}, // Peers configured via env or discovery
+            .enable_raft = enable_raft,
+        };
+
+        cluster_manager = try cluster.ClusterManager.init(allocator, cluster_config);
+        try cluster_manager.?.start();
+
+        log.info("Cluster mode enabled - Node ID: {s}, Port: {d}, Raft: {}", .{
+            node_id,
+            cluster_port,
+            enable_raft,
+        });
+    }
+    defer if (cluster_manager) |cm| cm.deinit();
+
+    // Initialize multi-tenancy if enabled
+    var tenant_manager: ?*multitenancy.TenantManager = null;
+    const enable_multitenancy = std.posix.getenv("SMTP_MULTITENANCY_ENABLED") != null;
+
+    if (enable_multitenancy) {
+        tenant_manager = try allocator.create(multitenancy.TenantManager);
+        tenant_manager.?.* = multitenancy.TenantManager.init(allocator);
+
+        log.info("Multi-tenancy enabled", .{});
+    }
+    defer if (tenant_manager) |tm| {
+        tm.deinit();
+        allocator.destroy(tm);
+    };
+
     // Create and start SMTP server
     var server = try smtp.Server.init(allocator, cfg, &log, db_ptr, auth_ptr, greylist_ptr);
     defer server.deinit();
 
+    // Log startup summary
     log.info("Starting SMTP server...", .{});
+    log.info("  Cluster mode: {}", .{enable_cluster});
+    log.info("  Multi-tenancy: {}", .{enable_multitenancy});
+    log.info("  Metrics: {}", .{smtp_metrics != null});
+    log.info("  Alerting: {}", .{alert_manager != null});
 
     server.start(&shutdown_requested) catch |err| {
         log.critical("Server error: {}", .{err});
         return err;
     };
+
+    // Cleanup
+    if (cluster_manager) |cm| {
+        cm.stop();
+        log.info("Cluster manager stopped", .{});
+    }
 
     log.info("=== SMTP Server Shutdown Complete ===", .{});
 }
