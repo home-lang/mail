@@ -6,6 +6,8 @@ const csrf_mod = @import("../auth/csrf.zig");
 const queue_mod = @import("../delivery/queue.zig");
 const filter_mod = @import("../message/filter.zig");
 const search_mod = @import("search.zig");
+const graphql = @import("graphql.zig");
+const audit = @import("../features/audit.zig");
 
 /// Validate username format
 fn validateUsername(username: []const u8) !void {
@@ -134,10 +136,18 @@ pub const APIServer = struct {
                 try self.handleGetConfig(stream);
             } else if (std.mem.startsWith(u8, path, "/api/logs")) {
                 try self.handleGetLogs(stream, path);
+            } else if (std.mem.startsWith(u8, path, "/api/audit")) {
+                try self.handleGetAuditLog(stream, path);
             } else {
                 try self.send404(stream);
             }
         } else if (std.mem.eql(u8, method, "POST")) {
+            // GraphQL endpoint doesn't require CSRF (uses its own auth)
+            if (std.mem.eql(u8, path, "/api/graphql") or std.mem.eql(u8, path, "/graphql")) {
+                try self.handleGraphQL(stream, request);
+                return;
+            }
+
             // Validate CSRF token for state-changing operations
             if (!try self.validateCSRFToken(request)) {
                 return self.send403(stream, "Invalid or missing CSRF token");
@@ -1069,6 +1079,113 @@ pub const APIServer = struct {
         _ = try stream.write(response);
     }
 
+    /// Handle GET /api/audit - Query audit log entries
+    /// Query params: action, actor, severity, limit, offset, from_date, to_date
+    fn handleGetAuditLog(self: *APIServer, stream: std.net.Stream, path: []const u8) !void {
+        // Parse query parameters
+        var action_filter: ?[]const u8 = null;
+        var actor_filter: ?[]const u8 = null;
+        var severity_filter: ?[]const u8 = null;
+        var limit: usize = 100;
+        var offset: usize = 0;
+
+        if (std.mem.indexOf(u8, path, "?")) |query_start| {
+            const query = path[query_start + 1 ..];
+            var params = std.mem.splitScalar(u8, query, '&');
+
+            while (params.next()) |param| {
+                if (std.mem.indexOf(u8, param, "=")) |eq_pos| {
+                    const key = param[0..eq_pos];
+                    const value = param[eq_pos + 1 ..];
+
+                    if (std.mem.eql(u8, key, "action")) {
+                        action_filter = value;
+                    } else if (std.mem.eql(u8, key, "actor")) {
+                        actor_filter = try self.urlDecode(value);
+                    } else if (std.mem.eql(u8, key, "severity")) {
+                        severity_filter = value;
+                    } else if (std.mem.eql(u8, key, "limit")) {
+                        limit = std.fmt.parseInt(usize, value, 10) catch 100;
+                        if (limit > 1000) limit = 1000; // Cap at 1000
+                    } else if (std.mem.eql(u8, key, "offset")) {
+                        offset = std.fmt.parseInt(usize, value, 10) catch 0;
+                    }
+                }
+            }
+        }
+
+        // Query audit entries from database
+        var entries = self.db.getAuditEntries(action_filter, actor_filter, severity_filter, limit, offset) catch |err| {
+            const error_msg = try std.fmt.allocPrint(
+                self.allocator,
+                "Failed to query audit log: {s}",
+                .{@errorName(err)},
+            );
+            defer self.allocator.free(error_msg);
+            return self.sendError(stream, 500, error_msg);
+        };
+        defer {
+            for (entries.items) |*entry| {
+                entry.deinit(self.allocator);
+            }
+            entries.deinit();
+        }
+
+        // Get total count for pagination
+        const total_count = self.db.getAuditCount(action_filter, actor_filter, severity_filter) catch 0;
+
+        // Build JSON response
+        var json = std.ArrayList(u8).init(self.allocator);
+        defer json.deinit();
+
+        try json.appendSlice("{\"entries\":[");
+
+        for (entries.items, 0..) |entry, i| {
+            if (i > 0) try json.appendSlice(",");
+
+            try std.fmt.format(json.writer(),
+                \\{{"id":{d},"timestamp":{d},"action":"{s}","actor":"{s}"
+            , .{
+                entry.id,
+                entry.timestamp,
+                entry.action.toString(),
+                entry.actor,
+            });
+
+            if (entry.target) |target| {
+                try std.fmt.format(json.writer(), ",\"target\":\"{s}\"", .{target});
+            }
+            if (entry.target_type) |target_type| {
+                try std.fmt.format(json.writer(), ",\"target_type\":\"{s}\"", .{target_type});
+            }
+            if (entry.ip_address) |ip| {
+                try std.fmt.format(json.writer(), ",\"ip_address\":\"{s}\"", .{ip});
+            }
+            if (entry.details) |details| {
+                // Details is already JSON, so don't quote it
+                try std.fmt.format(json.writer(), ",\"details\":{s}", .{details});
+            }
+
+            try std.fmt.format(json.writer(), ",\"severity\":\"{s}\"}}", .{entry.severity.toString()});
+        }
+
+        try std.fmt.format(json.writer(), "],\"count\":{d},\"total\":{d},\"limit\":{d},\"offset\":{d}}}", .{
+            entries.items.len,
+            total_count,
+            limit,
+            offset,
+        });
+
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ json.items.len, json.items },
+        );
+        defer self.allocator.free(response);
+
+        _ = try stream.write(response);
+    }
+
     /// Send error response with custom status code and message
     fn sendError(self: *APIServer, stream: std.net.Stream, status_code: u16, message: []const u8) !void {
         const status_text = switch (status_code) {
@@ -1122,6 +1239,91 @@ pub const APIServer = struct {
     fn send404(self: *APIServer, stream: std.net.Stream) !void {
         _ = self;
         const response = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
+        _ = try stream.write(response);
+    }
+
+    /// Handle GraphQL requests
+    /// Endpoint: POST /api/graphql or POST /graphql
+    fn handleGraphQL(self: *APIServer, stream: std.net.Stream, request: []const u8) !void {
+        // Find the body (after \r\n\r\n)
+        const body_start = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
+            try self.sendError(stream, 400, "Invalid request format");
+            return;
+        };
+        const body = request[body_start + 4 ..];
+
+        // Extract the GraphQL query from JSON body
+        // Expected format: {"query": "...", "variables": {...}}
+        const query = self.extractJsonField(body, "query") catch {
+            // Try to parse body as raw GraphQL query
+            if (body.len > 0) {
+                var executor = graphql.GraphQLExecutor.init(self.allocator, self.db, self.auth_backend);
+                const result = executor.execute(body) catch |err| {
+                    const error_response = try std.fmt.allocPrint(
+                        self.allocator,
+                        "{{\"errors\":[{{\"message\":\"Execution error: {}\"}}]}}",
+                        .{err},
+                    );
+                    defer self.allocator.free(error_response);
+
+                    const response = try std.fmt.allocPrint(
+                        self.allocator,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {d}\r\n\r\n{s}",
+                        .{ error_response.len, error_response },
+                    );
+                    defer self.allocator.free(response);
+
+                    _ = try stream.write(response);
+                    return;
+                };
+                defer self.allocator.free(result);
+
+                const response = try std.fmt.allocPrint(
+                    self.allocator,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {d}\r\n\r\n{s}",
+                    .{ result.len, result },
+                );
+                defer self.allocator.free(response);
+
+                _ = try stream.write(response);
+                return;
+            }
+
+            try self.sendError(stream, 400, "Missing query field in request body");
+            return;
+        };
+        defer self.allocator.free(query);
+
+        // Execute the GraphQL query
+        var executor = graphql.GraphQLExecutor.init(self.allocator, self.db, self.auth_backend);
+        const result = executor.execute(query) catch |err| {
+            const error_response = try std.fmt.allocPrint(
+                self.allocator,
+                "{{\"errors\":[{{\"message\":\"Execution error: {}\"}}]}}",
+                .{err},
+            );
+            defer self.allocator.free(error_response);
+
+            const response = try std.fmt.allocPrint(
+                self.allocator,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ error_response.len, error_response },
+            );
+            defer self.allocator.free(response);
+
+            _ = try stream.write(response);
+            return;
+        };
+        defer self.allocator.free(result);
+
+        // Send successful response
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ result.len, result },
+        );
+        defer self.allocator.free(response);
+
         _ = try stream.write(response);
     }
 };

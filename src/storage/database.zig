@@ -483,4 +483,365 @@ pub const Database = struct {
             return DatabaseError.StepFailed;
         }
     }
+
+    /// Get all users from the database
+    pub fn getAllUsers(self: *Database) ![]User {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql =
+            \\SELECT id, username, password_hash, email, enabled, created_at, updated_at
+            \\FROM users
+            \\ORDER BY username ASC
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        var users = std.ArrayList(User).init(self.allocator);
+        errdefer {
+            for (users.items) |*user| {
+                user.deinit(self.allocator);
+            }
+            users.deinit();
+        }
+
+        while (true) {
+            rc = sqlite.sqlite3_step(stmt);
+            if (rc == sqlite.SQLITE_DONE) break;
+            if (rc != sqlite.SQLITE_ROW) {
+                return DatabaseError.StepFailed;
+            }
+
+            const id = sqlite.sqlite3_column_int64(stmt, 0);
+            const username_ptr = sqlite.sqlite3_column_text(stmt, 1);
+            const password_ptr = sqlite.sqlite3_column_text(stmt, 2);
+            const email_ptr = sqlite.sqlite3_column_text(stmt, 3);
+            const enabled = sqlite.sqlite3_column_int(stmt, 4) != 0;
+            const created_at = sqlite.sqlite3_column_int64(stmt, 5);
+            const updated_at = sqlite.sqlite3_column_int64(stmt, 6);
+
+            try users.append(User{
+                .id = id,
+                .username = try self.allocator.dupe(u8, std.mem.span(username_ptr)),
+                .password_hash = try self.allocator.dupe(u8, std.mem.span(password_ptr)),
+                .email = try self.allocator.dupe(u8, std.mem.span(email_ptr)),
+                .enabled = enabled,
+                .created_at = created_at,
+                .updated_at = updated_at,
+            });
+        }
+
+        return users.toOwnedSlice();
+    }
+
+    /// Update user email
+    pub fn updateUserEmail(self: *Database, username: []const u8, new_email: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql =
+            \\UPDATE users
+            \\SET email = ?1, updated_at = ?2
+            \\WHERE username = ?3
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        const email_z = try self.allocator.dupeZ(u8, new_email);
+        defer self.allocator.free(email_z);
+        const username_z = try self.allocator.dupeZ(u8, username);
+        defer self.allocator.free(username_z);
+
+        const now = time_compat.timestamp();
+
+        _ = sqlite.sqlite3_bind_text(stmt, 1, email_z.ptr, -1, null);
+        _ = sqlite.sqlite3_bind_int64(stmt, 2, now);
+        _ = sqlite.sqlite3_bind_text(stmt, 3, username_z.ptr, -1, null);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_DONE) {
+            if (rc == sqlite.SQLITE_CONSTRAINT) {
+                return DatabaseError.AlreadyExists;
+            }
+            return DatabaseError.StepFailed;
+        }
+    }
+
+    // ==================== Audit Trail Operations ====================
+
+    /// Initialize audit log table
+    pub fn initAuditTable(self: *Database) !void {
+        const sql =
+            \\CREATE TABLE IF NOT EXISTS audit_log (
+            \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+            \\    timestamp INTEGER NOT NULL,
+            \\    action TEXT NOT NULL,
+            \\    actor TEXT NOT NULL,
+            \\    target TEXT,
+            \\    target_type TEXT,
+            \\    ip_address TEXT,
+            \\    details TEXT,
+            \\    severity TEXT NOT NULL
+            \\);
+            \\CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+            \\CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+            \\CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor);
+        ;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var errmsg: [*c]u8 = null;
+        const rc = sqlite.sqlite3_exec(self.db, sql_z.ptr, null, null, &errmsg);
+        if (rc != sqlite.SQLITE_OK) {
+            if (errmsg != null) {
+                sqlite.sqlite3_free(errmsg);
+            }
+            return DatabaseError.InitFailed;
+        }
+    }
+
+    /// Insert an audit log entry
+    pub fn insertAuditEntry(
+        self: *Database,
+        timestamp: i64,
+        action: []const u8,
+        actor: []const u8,
+        target: ?[]const u8,
+        target_type: ?[]const u8,
+        ip_address: ?[]const u8,
+        details: ?[]const u8,
+        severity: []const u8,
+    ) !i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql =
+            \\INSERT INTO audit_log (timestamp, action, actor, target, target_type, ip_address, details, severity)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        _ = sqlite.sqlite3_bind_int64(stmt, 1, timestamp);
+
+        const action_z = try self.allocator.dupeZ(u8, action);
+        defer self.allocator.free(action_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 2, action_z.ptr, -1, null);
+
+        const actor_z = try self.allocator.dupeZ(u8, actor);
+        defer self.allocator.free(actor_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 3, actor_z.ptr, -1, null);
+
+        if (target) |t| {
+            const target_z = try self.allocator.dupeZ(u8, t);
+            defer self.allocator.free(target_z);
+            _ = sqlite.sqlite3_bind_text(stmt, 4, target_z.ptr, -1, null);
+        } else {
+            _ = sqlite.sqlite3_bind_null(stmt, 4);
+        }
+
+        if (target_type) |tt| {
+            const tt_z = try self.allocator.dupeZ(u8, tt);
+            defer self.allocator.free(tt_z);
+            _ = sqlite.sqlite3_bind_text(stmt, 5, tt_z.ptr, -1, null);
+        } else {
+            _ = sqlite.sqlite3_bind_null(stmt, 5);
+        }
+
+        if (ip_address) |ip| {
+            const ip_z = try self.allocator.dupeZ(u8, ip);
+            defer self.allocator.free(ip_z);
+            _ = sqlite.sqlite3_bind_text(stmt, 6, ip_z.ptr, -1, null);
+        } else {
+            _ = sqlite.sqlite3_bind_null(stmt, 6);
+        }
+
+        if (details) |d| {
+            const details_z = try self.allocator.dupeZ(u8, d);
+            defer self.allocator.free(details_z);
+            _ = sqlite.sqlite3_bind_text(stmt, 7, details_z.ptr, -1, null);
+        } else {
+            _ = sqlite.sqlite3_bind_null(stmt, 7);
+        }
+
+        const severity_z = try self.allocator.dupeZ(u8, severity);
+        defer self.allocator.free(severity_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 8, severity_z.ptr, -1, null);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_DONE) {
+            return DatabaseError.StepFailed;
+        }
+
+        return sqlite.sqlite3_last_insert_rowid(self.db);
+    }
+
+    /// Audit entry structure for queries
+    pub const AuditLogEntry = struct {
+        id: i64,
+        timestamp: i64,
+        action: []const u8,
+        actor: []const u8,
+        target: ?[]const u8,
+        target_type: ?[]const u8,
+        ip_address: ?[]const u8,
+        details: ?[]const u8,
+        severity: []const u8,
+
+        pub fn deinit(self: *AuditLogEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.action);
+            allocator.free(self.actor);
+            if (self.target) |t| allocator.free(t);
+            if (self.target_type) |tt| allocator.free(tt);
+            if (self.ip_address) |ip| allocator.free(ip);
+            if (self.details) |d| allocator.free(d);
+            allocator.free(self.severity);
+        }
+    };
+
+    /// Get recent audit log entries
+    pub fn getAuditEntries(self: *Database, limit: usize, offset: usize) ![]AuditLogEntry {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql =
+            \\SELECT id, timestamp, action, actor, target, target_type, ip_address, details, severity
+            \\FROM audit_log
+            \\ORDER BY timestamp DESC
+            \\LIMIT ?1 OFFSET ?2
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        _ = sqlite.sqlite3_bind_int64(stmt, 1, @intCast(limit));
+        _ = sqlite.sqlite3_bind_int64(stmt, 2, @intCast(offset));
+
+        var entries = std.ArrayList(AuditLogEntry).init(self.allocator);
+        errdefer {
+            for (entries.items) |*entry| {
+                entry.deinit(self.allocator);
+            }
+            entries.deinit();
+        }
+
+        while (true) {
+            rc = sqlite.sqlite3_step(stmt);
+            if (rc == sqlite.SQLITE_DONE) break;
+            if (rc != sqlite.SQLITE_ROW) {
+                return DatabaseError.StepFailed;
+            }
+
+            const id = sqlite.sqlite3_column_int64(stmt, 0);
+            const timestamp = sqlite.sqlite3_column_int64(stmt, 1);
+            const action_ptr = sqlite.sqlite3_column_text(stmt, 2);
+            const actor_ptr = sqlite.sqlite3_column_text(stmt, 3);
+            const target_ptr = sqlite.sqlite3_column_text(stmt, 4);
+            const target_type_ptr = sqlite.sqlite3_column_text(stmt, 5);
+            const ip_ptr = sqlite.sqlite3_column_text(stmt, 6);
+            const details_ptr = sqlite.sqlite3_column_text(stmt, 7);
+            const severity_ptr = sqlite.sqlite3_column_text(stmt, 8);
+
+            try entries.append(AuditLogEntry{
+                .id = id,
+                .timestamp = timestamp,
+                .action = try self.allocator.dupe(u8, std.mem.span(action_ptr)),
+                .actor = try self.allocator.dupe(u8, std.mem.span(actor_ptr)),
+                .target = if (target_ptr != null) try self.allocator.dupe(u8, std.mem.span(target_ptr)) else null,
+                .target_type = if (target_type_ptr != null) try self.allocator.dupe(u8, std.mem.span(target_type_ptr)) else null,
+                .ip_address = if (ip_ptr != null) try self.allocator.dupe(u8, std.mem.span(ip_ptr)) else null,
+                .details = if (details_ptr != null) try self.allocator.dupe(u8, std.mem.span(details_ptr)) else null,
+                .severity = try self.allocator.dupe(u8, std.mem.span(severity_ptr)),
+            });
+        }
+
+        return entries.toOwnedSlice();
+    }
+
+    /// Get audit entries count
+    pub fn getAuditCount(self: *Database) !i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql = "SELECT COUNT(*) FROM audit_log";
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_ROW) {
+            return 0;
+        }
+
+        return sqlite.sqlite3_column_int64(stmt, 0);
+    }
+
+    /// Prune old audit entries
+    pub fn pruneAuditEntries(self: *Database, before_timestamp: i64) !i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql = "DELETE FROM audit_log WHERE timestamp < ?1";
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        _ = sqlite.sqlite3_bind_int64(stmt, 1, before_timestamp);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_DONE) {
+            return DatabaseError.StepFailed;
+        }
+
+        return sqlite.sqlite3_changes(self.db);
+    }
 };

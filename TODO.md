@@ -2,6 +2,26 @@
 
 ## Recent Updates 📝
 
+### v0.29.0 (2025-11-25) - GraphQL API & Enterprise Audit Trail 🏢
+- ✅ **GraphQL API for User Management**: Full GraphQL implementation
+  - Created `src/api/graphql.zig` with parser, executor, and resolvers
+  - Query: `users`, `user(username)`
+  - Mutations: `createUser`, `updateUser`, `deleteUser`, `changePassword`, `setUserEnabled`
+  - Schema introspection support
+  - Endpoint: POST /api/graphql and POST /graphql
+  - JSON request/response handling
+- ✅ **Audit Trail System**: Comprehensive administrative action logging
+  - Created `src/features/audit.zig` with full audit framework
+  - 22 auditable action types covering user, auth, config, security, and system events
+  - 4 severity levels: info, warning, important, critical
+  - AuditEntry with full metadata (id, timestamp, actor, target, IP, details)
+  - Thread-safe AuditTrail manager with mutex protection
+  - Database operations: initAuditTable, insertAuditEntry, getAuditEntries, getAuditCount, pruneAuditEntries
+  - REST API: GET /api/audit with filters (action, actor, severity, limit, offset)
+  - Pagination support with total count
+  - Configurable retention period (default 90 days)
+- 🎉 **Enterprise Milestone**: Phase 11 Enterprise Features progress - Audit Trail complete!
+
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
 - ✅ **Phase 4: Performance Optimizations COMPLETED**: All major performance enhancements implemented
   - ✅ **Buffer Pool System** (`src/infrastructure/buffer_pool.zig`)
@@ -557,7 +577,7 @@
     - [x] Quota and attachment limit support
     - [x] Auto-updating timestamps
   - [x] User management API (REST) - completed in v0.24.0
-  - [ ] User management API (GraphQL) - deferred
+  - [x] User management API (GraphQL) - completed in v0.29.0
 - [x] Implement password hashing with Argon2id
   - [x] Argon2id implementation (more secure than bcrypt)
   - [x] Base64 encoding for storage
@@ -1281,7 +1301,15 @@
 - [ ] **Architecture Decision Records**: Create `docs/ADR/` with design rationale
 
 ### Phase 11: Enterprise Features
-- [ ] **Audit Trail**: Log all administrative actions (user CRUD, config changes, ACL)
+- [x] **Audit Trail**: Log all administrative actions (user CRUD, config changes, ACL) ✅
+  - Created `src/features/audit.zig` with comprehensive audit system
+  - 22 audit action types (user CRUD, auth, config, security, system, email)
+  - 4 severity levels (info, warning, important, critical)
+  - AuditEntry struct with full metadata (actor, target, IP, details)
+  - AuditTrail manager with thread-safe logging
+  - Database operations in `src/storage/database.zig` (insert, query, count, prune)
+  - REST API endpoint: GET /api/audit with filtering (action, actor, severity, pagination)
+  - Configurable retention period (default 90 days)
 - [ ] **Backup/Restore CLI**: Create operational backup utility with verification
 - [ ] **Multi-Region Support**: Design cross-region replication and failover
 - [ ] **Service Dependency Graph**: Track dependencies for graceful degradation
@@ -1339,7 +1367,7 @@
   - [x] Comprehensive test coverage
 - [ ] Migration tools from other servers
 - [ ] Plugin system for extensibility
-- [ ] GraphQL API
+- [x] GraphQL API - completed in v0.29.0
 - [ ] WebSocket real-time notifications
 - [ ] IMAP server integration
 - [ ] POP3 server support
@@ -1424,7 +1452,7 @@ All research topics have been thoroughly investigated and documented in **docs/R
 ## Project Information
 
 **Last Updated**: 2025-11-25
-**Current Version**: v0.28.0
+**Current Version**: v0.29.0
 **Zig Version**: 0.15.1
 **License**: MIT
 
