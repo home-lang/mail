@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const database = @import("database.zig");
 
 /// Database storage backend for email messages
@@ -92,7 +93,7 @@ pub const DatabaseStorage = struct {
         }
 
         const size = body.len;
-        const received_at = std.time.timestamp();
+        const received_at = time_compat.timestamp();
 
         const query =
             \\INSERT INTO messages (message_id, email, sender, recipients, subject, body, headers, size, received_at)

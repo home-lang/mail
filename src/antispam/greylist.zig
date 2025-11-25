@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const database = @import("../storage/database.zig");
 
 /// Greylisting implementation for spam prevention with database persistence
@@ -85,7 +86,7 @@ pub const Greylist = struct {
             defer stmt.finalize();
 
             // Only load entries from last 7 days to avoid memory bloat
-            const cutoff = std.time.timestamp() - (7 * 86400);
+            const cutoff = time_compat.timestamp() - (7 * 86400);
             try stmt.bind(1, cutoff);
 
             while (try stmt.step()) {
@@ -167,7 +168,7 @@ pub const Greylist = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         if (self.entries.get(key)) |entry| {
             // Entry exists - check if it should be allowed
@@ -243,7 +244,7 @@ pub const Greylist = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const cutoff = now - self.auto_whitelist_after - self.retry_window;
 
         var to_remove = std.ArrayList([]const u8).init(self.allocator);

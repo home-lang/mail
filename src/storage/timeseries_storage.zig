@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Time-series filesystem storage for email messages
 /// Organizes messages by date hierarchy: year/month/day/<message-id>.eml
@@ -69,7 +70,7 @@ pub const TimeSeriesStorage = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const ts = timestamp orelse std.time.timestamp();
+        const ts = timestamp orelse time_compat.timestamp();
         const date = try self.getDateFromTimestamp(ts);
 
         // Create directory path: base/year/month/day
@@ -157,7 +158,7 @@ pub const TimeSeriesStorage = struct {
         message_id: []const u8,
         max_days_back: u32,
     ) !?MessageLocation {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         var day_offset: u32 = 0;
         while (day_offset < max_days_back) : (day_offset += 1) {
@@ -327,7 +328,7 @@ pub const TimeSeriesStorage = struct {
     ) !usize {
         _ = archive_path;
 
-        const cutoff_ts = std.time.timestamp() - @as(i64, days_old) * 86400;
+        const cutoff_ts = time_compat.timestamp() - @as(i64, days_old) * 86400;
         const cutoff_date = try self.getDateFromTimestamp(cutoff_ts);
 
         // Would iterate through directories older than cutoff
@@ -471,7 +472,7 @@ test "store and retrieve message" {
     try testing.expect(file_path.len > 0);
 
     // Get today's date for retrieval
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
     const date = try storage.getDateFromTimestamp(now);
 
     const retrieved = try storage.retrieveMessage(message_id, date.year, date.month, date.day);
@@ -508,7 +509,7 @@ test "list messages for day" {
     _ = try storage.storeMessage("msg1", "Content 1");
     _ = try storage.storeMessage("msg2", "Content 2");
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
     const date = try storage.getDateFromTimestamp(now);
 
     const messages = try storage.listMessagesForDay(date.year, date.month, date.day);
@@ -558,7 +559,7 @@ test "delete message" {
     const message_id = "delete-me";
     _ = try storage.storeMessage(message_id, "Content to delete");
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
     const date = try storage.getDateFromTimestamp(now);
 
     try storage.deleteMessage(message_id, date.year, date.month, date.day);

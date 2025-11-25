@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Auto-responder rule for vacation/out-of-office messages
 pub const AutoResponderRule = struct {
@@ -67,7 +68,7 @@ pub const AutoResponderRule = struct {
         if (!std.mem.eql(u8, to_email, self.email)) return false;
 
         // Check date range
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         if (self.start_date) |start| {
             if (now < start) return false;
         }
@@ -104,7 +105,7 @@ pub const AutoResponderRule = struct {
         }
 
         gop.value_ptr.count += 1;
-        gop.value_ptr.last_sent = std.time.timestamp();
+        gop.value_ptr.last_sent = time_compat.timestamp();
     }
 
     /// Generate auto-response message
@@ -347,8 +348,8 @@ test "auto-responder date range" {
     rule.enable();
 
     // Set date range in the past
-    const past_start = std.time.timestamp() - 86400 * 7; // 7 days ago
-    const past_end = std.time.timestamp() - 86400; // 1 day ago
+    const past_start = time_compat.timestamp() - 86400 * 7; // 7 days ago
+    const past_end = time_compat.timestamp() - 86400; // 1 day ago
     rule.setDateRange(past_start, past_end);
 
     // Should not respond (date range is in the past)

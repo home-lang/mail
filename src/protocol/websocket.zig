@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 const crypto = std.crypto;
@@ -167,9 +168,9 @@ pub const WebSocketSession = struct {
             .stream = stream,
             .state = .connecting,
             .subscriptions = std.ArrayList([]const u8){},
-            .last_ping = std.time.timestamp(),
+            .last_ping = time_compat.timestamp(),
             .config = config,
-            .last_pong = std.time.timestamp(),
+            .last_pong = time_compat.timestamp(),
         };
     }
 
@@ -416,13 +417,13 @@ pub const WebSocketSession = struct {
 
     /// Send ping
     pub fn sendPing(self: *WebSocketSession) !void {
-        self.last_ping = std.time.timestamp();
+        self.last_ping = time_compat.timestamp();
         try self.sendFrame(.ping, "");
     }
 
     /// Send pong
     pub fn sendPong(self: *WebSocketSession) !void {
-        self.last_pong = std.time.timestamp();
+        self.last_pong = time_compat.timestamp();
         try self.sendFrame(.pong, "");
     }
 
@@ -520,7 +521,7 @@ pub const NotificationManager = struct {
 
         const json_event = Event{
             .type = event_type,
-            .timestamp = std.time.timestamp(),
+            .timestamp = time_compat.timestamp(),
             .data = event,
         };
 
@@ -644,7 +645,7 @@ pub const WebSocketServer = struct {
                     session.sendPong() catch {};
                 },
                 .pong => {
-                    session.last_pong = std.time.timestamp();
+                    session.last_pong = time_compat.timestamp();
                 },
                 else => {},
             }
@@ -696,7 +697,7 @@ pub const WebSocketServer = struct {
             };
             try session.sendJson(PingResponse{
                 .status = "pong",
-                .timestamp = std.time.timestamp(),
+                .timestamp = time_compat.timestamp(),
             });
         }
     }

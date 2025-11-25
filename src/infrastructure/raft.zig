@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const logger = @import("../core/logger.zig");
 
 /// Raft Consensus Implementation
@@ -200,7 +201,7 @@ pub const RaftNode = struct {
             .state = std.atomic.Value(RaftState).init(.follower),
             .peers = std.StringHashMap(Peer).init(allocator),
             .snapshot = null,
-            .last_heartbeat = std.time.timestamp(),
+            .last_heartbeat = time_compat.timestamp(),
             .election_timeout_ms = 0,
             .random = prng.random(),
             .mutex = .{},

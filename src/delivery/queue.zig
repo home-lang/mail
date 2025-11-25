@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const database = @import("../storage/database.zig");
 
 /// Queue message status
@@ -242,7 +243,7 @@ pub const MessageQueue = struct {
         const msg = try self.allocator.create(QueuedMessage);
         errdefer self.allocator.destroy(msg);
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         msg.* = .{
             .id = id,
@@ -271,7 +272,7 @@ pub const MessageQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         for (self.messages.items) |msg| {
             if ((msg.status == .pending or msg.status == .retry) and msg.next_retry <= now) {
@@ -299,7 +300,7 @@ pub const MessageQueue = struct {
         for (self.messages.items, 0..) |msg, i| {
             if (std.mem.eql(u8, msg.id, id)) {
                 msg.status = .delivered;
-                msg.updated_at = std.time.timestamp();
+                msg.updated_at = time_compat.timestamp();
 
                 // Delete from database
                 try self.deleteFromDB(id);
@@ -322,7 +323,7 @@ pub const MessageQueue = struct {
 
         for (self.messages.items, 0..) |msg, i| {
             if (std.mem.eql(u8, msg.id, id)) {
-                const now = std.time.timestamp();
+                const now = time_compat.timestamp();
 
                 if (msg.attempts >= msg.max_attempts) {
                     // Permanent failure

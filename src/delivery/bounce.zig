@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Bounce message generator (RFC 3464 - DSN)
 pub const BounceGenerator = struct {
@@ -24,7 +25,7 @@ pub const BounceGenerator = struct {
         error_message: []const u8,
         original_message: ?[]const u8,
     ) ![]const u8 {
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         const date_str = try self.formatDate(timestamp);
         defer self.allocator.free(date_str);
 

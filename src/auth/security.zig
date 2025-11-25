@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 pub const RateLimiter = struct {
     allocator: std.mem.Allocator,
@@ -112,7 +113,7 @@ pub const RateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const bucket_key = self.getBucketKey(now);
 
         if (self.ip_counters.get(ip)) |counter| {
@@ -181,7 +182,7 @@ pub const RateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const bucket_key = self.getBucketKey(now);
 
         if (self.user_counters.get(user)) |counter| {
@@ -231,7 +232,7 @@ pub const RateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         if (self.ip_counters.get(ip)) |counter| {
             const elapsed = now - counter.window_start;
@@ -253,7 +254,7 @@ pub const RateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         if (self.user_counters.get(user)) |counter| {
             const elapsed = now - counter.window_start;
@@ -276,7 +277,7 @@ pub const RateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         // Calculate cutoff bucket - anything before this should be removed
         const cutoff_time = now - @as(i64, @intCast(self.window_seconds * 2));

@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 
 /// Simple TOML parser for configuration files
 /// Supports basic TOML features needed for server configuration:
@@ -195,7 +196,7 @@ pub const TomlParser = struct {
         };
         defer file.close();
 
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024); // 1MB max
+        const content = try time_compat.readFileToEnd(self.allocator, file, 1024 * 1024); // 1MB max
         defer self.allocator.free(content);
 
         return try self.parse(content);

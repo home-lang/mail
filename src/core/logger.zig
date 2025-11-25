@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 
 pub const LogLevel = enum {
     debug,
@@ -91,7 +92,7 @@ pub const Logger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         var buf: [8192]u8 = undefined;
 
         // Format the message
@@ -273,7 +274,7 @@ pub const Logger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         var log_buf: [8192]u8 = undefined;
 
         const log_entry = switch (self.format) {

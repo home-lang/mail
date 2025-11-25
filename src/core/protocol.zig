@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 const net = std.net;
 const config = @import("config.zig");
 const auth = @import("../auth/auth.zig");
@@ -112,7 +113,7 @@ pub const Session = struct {
         auth_backend: ?*auth.AuthBackend,
         greylist: ?*greylist_mod.Greylist,
     ) !Session {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         return Session{
             .allocator = allocator,
             .connection = connection,
@@ -196,7 +197,7 @@ pub const Session = struct {
     }
 
     fn checkTimeout(self: *Session) !void {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const elapsed = now - self.last_activity;
 
         if (elapsed > self.config.timeout_seconds) {
@@ -206,7 +207,7 @@ pub const Session = struct {
     }
 
     fn updateActivity(self: *Session) void {
-        self.last_activity = std.time.timestamp();
+        self.last_activity = time_compat.timestamp();
     }
 
     pub fn handle(self: *Session) !void {
@@ -566,7 +567,7 @@ pub const Session = struct {
                 .from = self.mail_from orelse "unknown",
                 .recipients = self.rcpt_to.items,
                 .size = message_data.items.len,
-                .timestamp = std.time.timestamp(),
+                .timestamp = time_compat.timestamp(),
                 .remote_addr = self.remote_addr,
             };
 
@@ -672,7 +673,7 @@ pub const Session = struct {
                         .from = self.mail_from orelse "unknown",
                         .recipients = self.rcpt_to.items,
                         .size = message.len,
-                        .timestamp = std.time.timestamp(),
+                        .timestamp = time_compat.timestamp(),
                         .remote_addr = self.remote_addr,
                     };
 

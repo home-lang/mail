@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const auth = @import("../auth/auth.zig");
 const logger = @import("../core/logger.zig");
 
@@ -137,7 +138,7 @@ pub const Mailbox = struct {
         return Mailbox{
             .name = try allocator.dupe(u8, name),
             .path = try allocator.dupe(u8, path),
-            .uidvalidity = @intCast(std.time.timestamp()),
+            .uidvalidity = @intCast(time_compat.timestamp()),
             .uidnext = 1,
             .flags = std.ArrayList([]const u8){},
             .permanent_flags = std.ArrayList([]const u8){},

@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const spf = @import("spf.zig");
 const dkim = @import("dkim.zig");
 
@@ -256,14 +257,14 @@ pub const DMARCAggregateReport = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, org_name: []const u8, email: []const u8) !DMARCAggregateReport {
-        const report_id = try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
+        const report_id = try std.fmt.allocPrint(allocator, "{d}", .{time_compat.timestamp()});
         return .{
             .allocator = allocator,
             .report_id = report_id,
             .org_name = try allocator.dupe(u8, org_name),
             .email = try allocator.dupe(u8, email),
-            .begin_timestamp = std.time.timestamp(),
-            .end_timestamp = std.time.timestamp() + 86400,
+            .begin_timestamp = time_compat.timestamp(),
+            .end_timestamp = time_compat.timestamp() + 86400,
             .records = std.ArrayList(ReportRecord).init(allocator),
         };
     }

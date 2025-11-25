@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const crypto = std.crypto;
 
 /// Email encryption at rest using AES-256-GCM
@@ -280,7 +281,7 @@ pub const EncryptedTimeSeriesStorage = struct {
         defer self.allocator.free(serialized);
 
         // Get current date for path
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const date = try self.getDateFromTimestamp(now);
 
         // Create directory path
@@ -516,7 +517,7 @@ test "encrypted time-series storage" {
     const file_path = try storage.storeMessage(message_id, plaintext);
     defer testing.allocator.free(file_path);
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
     const date = try storage.getDateFromTimestamp(now);
 
     const retrieved = try storage.retrieveMessage(message_id, date.year, date.month, date.day);

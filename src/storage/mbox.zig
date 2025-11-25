@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const path_sanitizer = @import("../core/path_sanitizer.zig");
 
 /// mbox format email storage (RFC 4155)
@@ -57,7 +58,7 @@ pub const MboxStorage = struct {
         try file.seekFromEnd(0);
 
         // Write mbox separator line
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         const date_str = try self.formatDate(timestamp);
         defer self.allocator.free(date_str);
 
@@ -93,7 +94,7 @@ pub const MboxStorage = struct {
         const file = try std.fs.cwd().openFile(self.mbox_path, .{});
         defer file.close();
 
-        const content = try file.readToEndAlloc(self.allocator, 100 * 1024 * 1024); // 100MB max
+        const content = try time_compat.readFileToEnd(self.allocator, file, 100 * 1024 * 1024); // 100MB max
         defer self.allocator.free(content);
 
         return try self.parseMessages(content);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// S3-compatible object storage backend for email messages
 /// Provides scalable, durable email storage using S3 API
@@ -101,7 +102,7 @@ pub const S3Storage = struct {
 
     /// Generate S3 object key for a message
     fn generateKey(self: *S3Storage, email: []const u8, message_id: []const u8) ![]const u8 {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const epoch_seconds: u64 = @intCast(now);
         const epoch_days = epoch_seconds / 86400;
         const year_day = std.time.epoch.EpochDay{ .day = epoch_days };
@@ -129,7 +130,7 @@ pub const S3Storage = struct {
         return S3ObjectMetadata{
             .key = try self.allocator.dupe(u8, key),
             .size = 0,
-            .last_modified = std.time.timestamp(),
+            .last_modified = time_compat.timestamp(),
             .etag = try self.allocator.dupe(u8, ""),
         };
     }

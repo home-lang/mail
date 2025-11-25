@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const logger = @import("../core/logger.zig");
 const metrics = @import("metrics.zig");
 
@@ -105,7 +106,7 @@ pub const Alert = struct {
             .severity = severity,
             .title = title,
             .message = message,
-            .timestamp = std.time.timestamp(),
+            .timestamp = time_compat.timestamp(),
         };
     }
 };
@@ -248,7 +249,7 @@ pub const AlertManager = struct {
             .mutex = .{},
             .stats = AlertStats{},
             .enabled = true,
-            .rate_limit_reset = std.time.timestamp() + 60,
+            .rate_limit_reset = time_compat.timestamp() + 60,
         };
     }
 
@@ -438,7 +439,7 @@ pub const AlertManager = struct {
     /// Evaluate all rules against current metrics
     pub fn evaluateRules(self: *AlertManager, smtp_metrics: *metrics.SmtpMetrics) !void {
         const snapshot = smtp_metrics.getSnapshot();
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         for (self.rules.items) |*rule| {
             if (!rule.enabled) continue;
@@ -473,7 +474,7 @@ pub const AlertManager = struct {
     // ===== Internal Methods =====
 
     fn checkRateLimit(self: *AlertManager) bool {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         if (now >= self.rate_limit_reset) {
             self.rate_limit_count = 0;

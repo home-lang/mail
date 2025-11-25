@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 const net = std.net;
 const logger = @import("logger.zig");
 const tls = @import("tls");
@@ -83,7 +84,7 @@ pub const SessionTicket = struct {
     creation_time: i64, // When ticket was created
 
     pub fn isExpired(self: SessionTicket) bool {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         return (now - self.creation_time) > self.ticket_lifetime;
     }
 };
@@ -102,7 +103,7 @@ pub const OcspResponse = struct {
     };
 
     pub fn isValid(self: OcspResponse) bool {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         return now >= self.this_update and now <= self.next_update and self.status == .good;
     }
 };
@@ -350,7 +351,7 @@ pub const TlsContext = struct {
             };
             defer cert_file.close();
 
-            const cert_data = try cert_file.readToEndAlloc(self.allocator, 1024 * 1024); // Max 1MB
+            const cert_data = try time_compat.readFileToEnd(self.allocator, cert_file, 1024 * 1024); // Max 1MB
             self.cert_data = cert_data;
 
             self.logger.info("Certificate loaded successfully ({d} bytes)", .{cert_data.len});
@@ -365,7 +366,7 @@ pub const TlsContext = struct {
             };
             defer key_file.close();
 
-            const key_data = try key_file.readToEndAlloc(self.allocator, 1024 * 1024); // Max 1MB
+            const key_data = try time_compat.readFileToEnd(self.allocator, key_file, 1024 * 1024); // Max 1MB
             self.key_data = key_data;
 
             self.logger.info("Private key loaded successfully ({d} bytes)", .{key_data.len});
@@ -613,7 +614,7 @@ pub const OcspHelper = struct {
 
     /// Check if OCSP response needs refresh
     pub fn needsRefresh(response: *const OcspResponse) bool {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         // Refresh if within 10% of expiry
         const remaining = response.next_update - now;
         const total_validity = response.next_update - response.this_update;
@@ -716,7 +717,7 @@ test "session ticket expiry" {
         .ticket_age_add = 12345,
         .nonce = [_]u8{0} ** 12,
         .ticket = "",
-        .creation_time = std.time.timestamp() - 3601, // Created over 1 hour ago
+        .creation_time = time_compat.timestamp() - 3601, // Created over 1 hour ago
     };
 
     try testing.expect(ticket.isExpired());
@@ -726,7 +727,7 @@ test "session ticket expiry" {
         .ticket_age_add = 12345,
         .nonce = [_]u8{0} ** 12,
         .ticket = "",
-        .creation_time = std.time.timestamp(),
+        .creation_time = time_compat.timestamp(),
     };
 
     try testing.expect(!fresh_ticket.isExpired());
@@ -735,7 +736,7 @@ test "session ticket expiry" {
 test "OCSP response validity" {
     const testing = std.testing;
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
 
     const valid_response = OcspResponse{
         .status = .good,
@@ -822,7 +823,7 @@ test "session cache" {
         .ticket_age_add = 12345,
         .nonce = nonce,
         .ticket = ticket_data,
-        .creation_time = std.time.timestamp(),
+        .creation_time = time_compat.timestamp(),
     };
 
     try cache.put("session-1", ticket);

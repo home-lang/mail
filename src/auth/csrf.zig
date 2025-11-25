@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const crypto = std.crypto;
 
 /// CSRF token manager for protecting against Cross-Site Request Forgery attacks
@@ -51,7 +52,7 @@ pub const CSRFManager = struct {
         const token = try self.allocator.alloc(u8, token_b64_len);
         const encoded = encoder.encode(token, &token_bytes);
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const expires_at = now + self.token_lifetime_seconds;
 
         // Store token with expiration
@@ -71,7 +72,7 @@ pub const CSRFManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         // Check if token exists
         const entry = self.tokens.getEntry(token) orelse return false;
@@ -104,7 +105,7 @@ pub const CSRFManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         const entry = self.tokens.getEntry(token) orelse return false;
 
@@ -123,7 +124,7 @@ pub const CSRFManager = struct {
 
     /// Cleanup expired tokens (call with mutex held)
     fn cleanupExpiredTokensLocked(self: *CSRFManager, max_items: usize) !void {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         var count: usize = 0;
 
         var it = self.tokens.iterator();
@@ -148,7 +149,7 @@ pub const CSRFManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         var active: usize = 0;
 
         var it = self.tokens.iterator();

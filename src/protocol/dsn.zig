@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// DSN (Delivery Status Notification) extension (RFC 3461)
 /// Allows senders to request notification of delivery status
@@ -93,7 +94,7 @@ pub const DSNHandler = struct {
         var dsn = std.ArrayList(u8).init(self.allocator);
         defer dsn.deinit();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         // Headers
         try dsn.appendSlice("Content-Type: multipart/report; report-type=delivery-status; boundary=\"DSN_BOUNDARY\"\r\n");
@@ -163,7 +164,7 @@ pub const DSNHandler = struct {
         var dsn = std.ArrayList(u8).init(self.allocator);
         defer dsn.deinit();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         // Headers
         try dsn.appendSlice("Content-Type: multipart/report; report-type=delivery-status; boundary=\"DSN_BOUNDARY\"\r\n");
@@ -232,7 +233,7 @@ pub const DSNHandler = struct {
         var dsn = std.ArrayList(u8).init(self.allocator);
         defer dsn.deinit();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         try dsn.appendSlice("Content-Type: multipart/report; report-type=delivery-status; boundary=\"DSN_BOUNDARY\"\r\n");
         try std.fmt.format(dsn.writer(), "Date: {d}\r\n", .{now});

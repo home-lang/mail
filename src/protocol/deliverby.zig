@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// DELIVERBY extension (RFC 2852)
 /// Allows clients to request delivery within a specified time period
@@ -105,14 +106,14 @@ pub const DeliverByHandler = struct {
     /// Calculate delivery deadline timestamp
     pub fn calculateDeadline(self: *DeliverByHandler, params: DeliverByParams) i64 {
         _ = self;
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         return now + params.deadline_seconds;
     }
 
     /// Check if delivery deadline has been exceeded
     pub fn isDeadlineExceeded(self: *DeliverByHandler, deadline: i64) bool {
         _ = self;
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         return now > deadline;
     }
 
@@ -257,12 +258,12 @@ pub const TimedMessage = struct {
     }
 
     pub fn isExpired(self: *const TimedMessage) bool {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         return now > self.deadline;
     }
 
     pub fn timeRemaining(self: *const TimedMessage) i64 {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const remaining = self.deadline - now;
         return if (remaining > 0) remaining else 0;
     }
@@ -383,7 +384,7 @@ test "calculate deadline" {
     const params = DeliverByParams{ .deadline_seconds = 3600, .notify_mode = .return_notification };
     const deadline = handler.calculateDeadline(params);
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
     try testing.expect(deadline > now);
     try testing.expect(deadline <= now + 3600 + 1); // Allow 1 second for execution
 }
@@ -402,7 +403,7 @@ test "notify mode enum" {
 test "timed message expiration" {
     const testing = std.testing;
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
     var message = TimedMessage{
         .message_id = try testing.allocator.dupe(u8, "msg-123"),
         .deadline = now - 100, // Expired 100 seconds ago
@@ -422,7 +423,7 @@ test "timed message queue" {
     var queue = TimedMessageQueue.init(testing.allocator);
     defer queue.deinit();
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
 
     // Add messages with different deadlines
     const msg1 = TimedMessage{

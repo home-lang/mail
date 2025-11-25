@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const path_sanitizer = @import("../core/path_sanitizer.zig");
 
 /// Backup and restore utilities for email data
@@ -79,7 +80,7 @@ pub const BackupManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         const backup_name = try std.fmt.allocPrint(
             self.allocator,
             "full-{d}",
@@ -132,7 +133,7 @@ pub const BackupManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         const backup_name = try std.fmt.allocPrint(
             self.allocator,
             "incr-{d}",
@@ -266,7 +267,7 @@ pub const BackupManager = struct {
             self.allocator.free(backups);
         }
 
-        const cutoff_time = std.time.timestamp() - @as(i64, self.config.retention_days) * 86400;
+        const cutoff_time = time_compat.timestamp() - @as(i64, self.config.retention_days) * 86400;
         var deleted_count: usize = 0;
 
         for (backups) |backup| {

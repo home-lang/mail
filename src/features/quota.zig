@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const database = @import("../storage/database.zig");
 
 /// User quota management
@@ -65,7 +66,7 @@ pub const QuotaManager = struct {
 
         // Check cache first
         if (self.quota_cache.get(email)) |info| {
-            const now = std.time.timestamp();
+            const now = time_compat.timestamp();
             if (now - info.cached_at < self.cache_ttl) {
                 return info;
             }
@@ -88,7 +89,7 @@ pub const QuotaManager = struct {
             const info = QuotaInfo{
                 .limit_bytes = @intCast(quota_limit),
                 .used_bytes = @intCast(quota_used),
-                .cached_at = std.time.timestamp(),
+                .cached_at = time_compat.timestamp(),
             };
 
             // Update cache
@@ -333,7 +334,7 @@ test "quota info calculation" {
     const info = QuotaInfo{
         .limit_bytes = 1024 * 1024 * 1024, // 1 GB
         .used_bytes = 512 * 1024 * 1024, // 512 MB
-        .cached_at = std.time.timestamp(),
+        .cached_at = time_compat.timestamp(),
     };
 
     const used_f: f64 = @floatFromInt(info.used_bytes);

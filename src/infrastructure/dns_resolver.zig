@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// DNS Resolver with validation for address family and result verification
 /// Provides safe wrappers around std.net.getAddressList with proper error handling
@@ -271,7 +272,7 @@ pub const DNSCache = struct {
         family: std.posix.sa_family_t,
 
         pub fn isExpired(self: CacheEntry) bool {
-            return std.time.timestamp() >= self.expires_at;
+            return time_compat.timestamp() >= self.expires_at;
         }
     };
 
@@ -325,7 +326,7 @@ pub const DNSCache = struct {
         const hostname_copy = try self.allocator.dupe(u8, hostname);
         errdefer self.allocator.free(hostname_copy);
 
-        const expires_at = std.time.timestamp() + @as(i64, @intCast(self.default_ttl_seconds));
+        const expires_at = time_compat.timestamp() + @as(i64, @intCast(self.default_ttl_seconds));
 
         try self.cache.put(hostname_copy, .{
             .address = address,

@@ -3,6 +3,7 @@
 // https://www.ftc.gov/business-guidance/resources/can-spam-act-compliance-guide-business
 
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// CAN-SPAM compliance checker and enforcer
 pub const CanSpamCompliance = struct {
@@ -427,7 +428,7 @@ pub const UnsubscribeList = struct {
         else
             null;
 
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
 
         try self.list.put(email_copy, .{
             .email = email_copy,

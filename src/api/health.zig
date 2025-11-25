@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Server statistics with thread-safe atomic counters
 pub const ServerStats = struct {
@@ -264,7 +265,7 @@ pub const HealthServer = struct {
             .allocator = allocator,
             .port = port,
             .stats_provider = stats_provider,
-            .start_time = std.time.timestamp(),
+            .start_time = time_compat.timestamp(),
             .active_connections = active_connections,
             .max_connections = max_connections,
         };
@@ -312,7 +313,7 @@ pub const HealthServer = struct {
         var health = HealthCheck.init(self.allocator);
         defer health.deinit();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         health.uptime_seconds = now - self.start_time;
         health.active_connections = self.active_connections.load(.monotonic);
         health.max_connections = self.max_connections;

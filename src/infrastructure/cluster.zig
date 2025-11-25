@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const raft = @import("raft.zig");
 
 /// Cluster mode for high availability SMTP server
@@ -57,7 +58,7 @@ pub const ClusterNode = struct {
 
     /// Update heartbeat timestamp atomically
     pub fn updateHeartbeat(self: *ClusterNode) void {
-        self.last_heartbeat.store(std.time.timestamp(), .release);
+        self.last_heartbeat.store(time_compat.timestamp(), .release);
     }
 
     /// Get last heartbeat timestamp atomically
@@ -156,7 +157,7 @@ pub const ClusterManager = struct {
             .port = config.bind_port,
             .role = std.atomic.Value(NodeRole).init(.follower), // Start as follower
             .status = std.atomic.Value(NodeStatus).init(.healthy),
-            .last_heartbeat = std.atomic.Value(i64).init(std.time.timestamp()),
+            .last_heartbeat = std.atomic.Value(i64).init(time_compat.timestamp()),
             .metadata = .{
                 .version = try allocator.dupe(u8, "v0.26.0"),
                 .uptime_seconds = 0,
@@ -289,7 +290,7 @@ pub const ClusterManager = struct {
 
     /// Send heartbeat to all nodes
     fn sendHeartbeat(self: *ClusterManager) !void {
-        self.local_node.last_heartbeat = std.time.timestamp();
+        self.local_node.last_heartbeat = time_compat.timestamp();
 
         self.nodes_mutex.lock();
         defer self.nodes_mutex.unlock();
@@ -304,7 +305,7 @@ pub const ClusterManager = struct {
 
     /// Check health of all nodes
     fn checkNodeHealth(self: *ClusterManager) !void {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         const timeout = @divFloor(self.config.heartbeat_timeout_ms, 1000);
 
         self.nodes_mutex.lock();
@@ -367,7 +368,7 @@ pub const ClusterManager = struct {
             .port = port,
             .role = std.atomic.Value(NodeRole).init(.follower),
             .status = std.atomic.Value(NodeStatus).init(.healthy),
-            .last_heartbeat = std.atomic.Value(i64).init(std.time.timestamp()),
+            .last_heartbeat = std.atomic.Value(i64).init(time_compat.timestamp()),
             .metadata = .{
                 .version = try self.allocator.dupe(u8, "unknown"),
                 .uptime_seconds = 0,

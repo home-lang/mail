@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Multi-tenancy support for SMTP server
 /// Enables multiple isolated organizations to share the same infrastructure
@@ -253,8 +254,8 @@ pub const MultiTenancyManager = struct {
             .name = try self.allocator.dupe(u8, name),
             .domain = try self.allocator.dupe(u8, domain),
             .enabled = true,
-            .created_at = std.time.timestamp(),
-            .updated_at = std.time.timestamp(),
+            .created_at = time_compat.timestamp(),
+            .updated_at = time_compat.timestamp(),
             .max_users = limits.max_users,
             .max_domains = limits.max_domains,
             .max_storage_mb = limits.max_storage_mb,
@@ -277,7 +278,7 @@ pub const MultiTenancyManager = struct {
 
     /// Update tenant
     pub fn updateTenant(self: *MultiTenancyManager, tenant: *Tenant) !void {
-        tenant.updated_at = std.time.timestamp();
+        tenant.updated_at = time_compat.timestamp();
 
         // Update in database
         try self.db.updateTenant(tenant);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Circuit breaker states
 pub const CircuitState = enum {
@@ -52,7 +53,7 @@ pub const CircuitBreaker = struct {
             .success_count = 0,
             .last_failure_time = 0,
             .last_success_time = 0,
-            .last_state_change = std.time.timestamp(),
+            .last_state_change = time_compat.timestamp(),
             .mutex = std.Thread.Mutex{},
         };
     }
@@ -66,7 +67,7 @@ pub const CircuitBreaker = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         switch (self.state) {
             .closed => return true,
@@ -94,7 +95,7 @@ pub const CircuitBreaker = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         self.last_success_time = now;
 
         switch (self.state) {
@@ -124,7 +125,7 @@ pub const CircuitBreaker = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         self.last_failure_time = now;
         self.failure_count += 1;
 
@@ -154,7 +155,7 @@ pub const CircuitBreaker = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         self.state = .closed;
         self.failure_count = 0;
         self.success_count = 0;
@@ -174,7 +175,7 @@ pub const CircuitBreaker = struct {
             .success_count = self.success_count,
             .last_failure_time = self.last_failure_time,
             .last_success_time = self.last_success_time,
-            .time_in_current_state = std.time.timestamp() - self.last_state_change,
+            .time_in_current_state = time_compat.timestamp() - self.last_state_change,
         };
     }
 

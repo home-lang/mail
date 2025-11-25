@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const database = @import("database.zig");
 
 /// Migration definition
@@ -78,7 +79,7 @@ pub const MigrationManager = struct {
 
         try stmt.bind(1, @as(i64, @intCast(migration.version)));
         try stmt.bind(2, migration.name);
-        try stmt.bind(3, std.time.timestamp());
+        try stmt.bind(3, time_compat.timestamp());
 
         _ = try stmt.step();
     }

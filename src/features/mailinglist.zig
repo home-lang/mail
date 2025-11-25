@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Mailing list management and message distribution
 pub const MailingList = struct {
@@ -50,7 +51,7 @@ pub const MailingList = struct {
         const subscriber = Subscriber{
             .email = email,
             .name = name,
-            .subscribed_at = std.time.timestamp(),
+            .subscribed_at = time_compat.timestamp(),
             .enabled = true,
             .digest_mode = false,
         };

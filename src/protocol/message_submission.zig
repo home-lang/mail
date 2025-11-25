@@ -2,6 +2,7 @@
 // Handles message submission from Mail User Agents (MUAs)
 
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Message Submission Agent - RFC 6409 compliant
 pub const MessageSubmissionAgent = struct {
@@ -108,7 +109,7 @@ pub const MessageSubmissionAgent = struct {
         auth_user: []const u8,
         client_ip: []const u8,
     ) !void {
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         const date = try self.formatTimestamp(timestamp);
         defer self.allocator.free(date);
 
@@ -147,7 +148,7 @@ pub const MessageSubmissionAgent = struct {
         var random_bytes: [16]u8 = undefined;
         std.crypto.random.bytes(&random_bytes);
 
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
 
         return try std.fmt.allocPrint(
             self.allocator,
@@ -158,7 +159,7 @@ pub const MessageSubmissionAgent = struct {
 
     /// Generate RFC 5322 compliant Date header
     fn generateRFC5322Date(self: *Self) ![]const u8 {
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         return try self.formatTimestamp(timestamp);
     }
 

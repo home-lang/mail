@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const sqlite = @cImport({
     @cInclude("sqlite3.h");
 });
@@ -316,7 +317,7 @@ pub const Database = struct {
         const email_z = try self.allocator.dupeZ(u8, email);
         defer self.allocator.free(email_z);
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         _ = sqlite.sqlite3_bind_text(stmt, 1, username_z.ptr, -1, null);
         _ = sqlite.sqlite3_bind_text(stmt, 2, password_z.ptr, -1, null);
@@ -409,7 +410,7 @@ pub const Database = struct {
         const username_z = try self.allocator.dupeZ(u8, username);
         defer self.allocator.free(username_z);
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         _ = sqlite.sqlite3_bind_text(stmt, 1, password_z.ptr, -1, null);
         _ = sqlite.sqlite3_bind_int64(stmt, 2, now);
@@ -471,7 +472,7 @@ pub const Database = struct {
         const username_z = try self.allocator.dupeZ(u8, username);
         defer self.allocator.free(username_z);
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         _ = sqlite.sqlite3_bind_int(stmt, 1, if (enabled) 1 else 0);
         _ = sqlite.sqlite3_bind_int64(stmt, 2, now);

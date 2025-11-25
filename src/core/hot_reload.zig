@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 const config = @import("config.zig");
 const args = @import("args.zig");
 const logger = @import("logger.zig");
@@ -22,7 +23,7 @@ pub const HotReloadManager = struct {
             .allocator = allocator,
             .current_config = cfg,
             .config_file_path = config_file_path,
-            .last_reload_time = std.time.timestamp(),
+            .last_reload_time = time_compat.timestamp(),
             .reload_count = 0,
             .mutex = .{},
             .callbacks = std.ArrayList(ConfigChangeCallback).init(allocator),
@@ -95,7 +96,7 @@ pub const HotReloadManager = struct {
         if (old_config.webhook_url) |u| self.allocator.free(u);
 
         // Update reload statistics
-        self.last_reload_time = std.time.timestamp();
+        self.last_reload_time = time_compat.timestamp();
         self.reload_count += 1;
 
         // Notify callbacks

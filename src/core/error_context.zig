@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 
 /// Error context for debugging and recovery
 pub const ErrorContext = struct {
@@ -17,7 +18,7 @@ pub const ErrorContext = struct {
             .component = try allocator.dupe(u8, component),
             .details = std.StringHashMap([]const u8).init(allocator),
             .stack_trace = null,
-            .timestamp = std.time.timestamp(),
+            .timestamp = time_compat.timestamp(),
             .error_type = try allocator.dupe(u8, "Unknown"),
         };
     }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const database = @import("../storage/database.zig");
 const auth_mod = @import("../auth/auth.zig");
 const csrf_mod = @import("../auth/csrf.zig");
@@ -1002,7 +1003,7 @@ pub const APIServer = struct {
             try log_file.seekTo(file_size - read_size);
         }
 
-        const log_content = try log_file.readToEndAlloc(self.allocator, 1024 * 1024);
+        const log_content = try time_compat.readFileToEnd(self.allocator, log_file, 1024 * 1024);
         defer self.allocator.free(log_content);
 
         // Split into lines and take last N

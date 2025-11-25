@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const sqlite = @cImport(@cInclude("sqlite3.h"));
 
 /// GDPR Compliance Module
@@ -227,7 +228,7 @@ pub const GDPRManager = struct {
 
     /// Export all user data (Article 15 & 20)
     pub fn exportUserData(self: *GDPRManager, username: []const u8) !DataExport {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         // Get personal info
         const personal_info = try self.getPersonalInfo(username);
@@ -482,7 +483,7 @@ pub const GDPRManager = struct {
 
     /// Log GDPR data access (Article 30)
     pub fn logDataAccess(self: *GDPRManager, username: []const u8, action: []const u8, ip_address: []const u8) !void {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         const query = "INSERT INTO audit_log (username, timestamp, action, ip_address, user_agent, success) VALUES (?, ?, ?, ?, ?, 1)";
 

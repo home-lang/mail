@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const cluster = @import("cluster.zig");
 
 /// Network communication for cluster nodes
@@ -66,7 +67,7 @@ pub const ClusterNetwork = struct {
         const message = HeartbeatMessage{
             .node_id = local_node.id,
             .role = local_node.role,
-            .timestamp = std.time.timestamp(),
+            .timestamp = time_compat.timestamp(),
             .metadata = local_node.metadata,
         };
 
@@ -82,7 +83,7 @@ pub const ClusterNetwork = struct {
         const message = StateUpdateMessage{
             .key = key,
             .value = value,
-            .timestamp = std.time.timestamp(),
+            .timestamp = time_compat.timestamp(),
         };
 
         try self.sendMessage(stream, .state_update, message);
@@ -96,7 +97,7 @@ pub const ClusterNetwork = struct {
 
         const message = ElectionMessage{
             .candidate_id = candidate_id,
-            .timestamp = std.time.timestamp(),
+            .timestamp = time_compat.timestamp(),
         };
 
         try self.sendMessage(stream, .election, message);

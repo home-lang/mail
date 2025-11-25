@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 
 /// Certificate validation errors
 pub const CertValidationError = error{
@@ -194,7 +195,7 @@ pub const CertificateValidator = struct {
             .errors = std.ArrayList([]const u8).init(self.allocator),
         };
 
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
 
         // Check if certificate is not yet valid
         if (now < not_before) {
@@ -285,7 +286,7 @@ test "expiration check" {
     const testing = std.testing;
     var validator = CertificateValidator.init(testing.allocator);
 
-    const now = std.time.timestamp();
+    const now = time_compat.timestamp();
     const not_before = now - 86400; // 1 day ago
     const not_after = now + (30 * 86400); // 30 days from now
 

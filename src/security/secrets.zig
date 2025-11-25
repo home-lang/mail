@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const logger = @import("../core/logger.zig");
 
 /// Secret Management Integration
@@ -204,7 +205,7 @@ pub const SecretManager = struct {
 
         // Check cache first
         if (self.cache.get(name)) |cached| {
-            if (cached.expires_at > std.time.timestamp()) {
+            if (cached.expires_at > time_compat.timestamp()) {
                 self.stats.cache_hits += 1;
                 return try self.allocator.dupe(u8, cached.value);
             }
@@ -360,7 +361,7 @@ pub const SecretManager = struct {
         };
         defer file.close();
 
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
+        const content = try time_compat.readFileToEnd(self.allocator, file, 1024 * 1024);
 
         // Trim trailing newline if present
         var value = content;
@@ -422,7 +423,7 @@ pub const SecretManager = struct {
         };
         defer file.close();
 
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
+        const content = try time_compat.readFileToEnd(self.allocator, file, 1024 * 1024);
 
         // Trim trailing newline
         var value = content;
@@ -439,7 +440,7 @@ pub const SecretManager = struct {
 
         try self.cache.put(name_copy, CachedSecret{
             .value = value_copy,
-            .expires_at = std.time.timestamp() + self.cache_ttl_seconds,
+            .expires_at = time_compat.timestamp() + self.cache_ttl_seconds,
             .version = null,
         });
     }

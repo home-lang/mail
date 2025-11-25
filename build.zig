@@ -14,13 +14,11 @@ pub fn build(b: *std.Build) void {
     });
     const tls_module = tls.module("tls");
 
-    // Add zig-bump dependency for version management
-    const bump = b.dependency("bump", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const bump_exe = bump.artifact("bump");
-    b.installArtifact(bump_exe);
+    // Note: zig-bump dependency removed - version management steps disabled
+    // To re-enable, add bump dependency to build.zig.zon and uncomment below:
+    // const bump = b.dependency("bump", .{ .target = target, .optimize = optimize });
+    // const bump_exe = bump.artifact("bump");
+    // b.installArtifact(bump_exe);
 
     if (build_all_targets) {
         // Build for all supported targets
@@ -260,8 +258,8 @@ pub fn build(b: *std.Build) void {
         cross_step.dependOn(b.getInstallStep());
     }
 
-    // Version management steps using zig-bump
-    addVersionManagementSteps(b, bump_exe);
+    // Note: Version management steps disabled - bump dependency not available
+    // To re-enable, add bump dependency and call: addVersionManagementSteps(b, bump_exe);
 }
 
 /// Add version management build steps

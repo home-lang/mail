@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 
 /// Lock-free connection pool using Compare-And-Swap (CAS) operations
 /// Provides O(1) acquire/release with minimal contention
@@ -17,7 +18,7 @@ pub fn ConnectionPool(comptime T: type) type {
                 return .{
                     .data = data,
                     .in_use = std.atomic.Value(bool).init(false),
-                    .last_used = std.atomic.Value(i64).init(std.time.timestamp()),
+                    .last_used = std.atomic.Value(i64).init(time_compat.timestamp()),
                     .connection_id = id,
                 };
             }
@@ -33,7 +34,7 @@ pub fn ConnectionPool(comptime T: type) type {
                 );
                 if (result == null) {
                     // Successfully acquired
-                    self.last_used.store(std.time.timestamp(), .release);
+                    self.last_used.store(time_compat.timestamp(), .release);
                     return true;
                 }
                 return false;
@@ -41,7 +42,7 @@ pub fn ConnectionPool(comptime T: type) type {
 
             /// Release this connection
             pub fn release(self: *PooledConnection) void {
-                self.last_used.store(std.time.timestamp(), .release);
+                self.last_used.store(time_compat.timestamp(), .release);
                 self.in_use.store(false, .release);
             }
 
@@ -52,7 +53,7 @@ pub fn ConnectionPool(comptime T: type) type {
 
             /// Get time since last use (in seconds)
             pub fn idleTime(self: *PooledConnection) i64 {
-                const now = std.time.timestamp();
+                const now = time_compat.timestamp();
                 const last = self.last_used.load(.acquire);
                 return now - last;
             }

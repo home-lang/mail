@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const testing = std.testing;
 const database = @import("database.zig");
 
@@ -394,12 +395,12 @@ test "Database User struct timestamps" {
     var db = try database.Database.init(allocator, ":memory:");
     defer db.deinit();
 
-    const before = std.time.timestamp();
+    const before = time_compat.timestamp();
 
     // Create user
     _ = try db.createUser("timeuser", "hash", "time@example.com");
 
-    const after = std.time.timestamp();
+    const after = time_compat.timestamp();
 
     // Get user and check timestamps
     var user = try db.getUserByUsername("timeuser");

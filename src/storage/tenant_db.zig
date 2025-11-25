@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("../core/time_compat.zig");
 const sqlite = @import("sqlite");
 const multitenancy = @import("../features/multitenancy.zig");
 
@@ -212,7 +213,7 @@ pub const TenantDB = struct {
         stmt.bind(.text, 1, tenant.name);
         stmt.bind(.text, 2, tenant.domain);
         stmt.bind(.int64, 3, if (tenant.enabled) @as(i64, 1) else @as(i64, 0));
-        stmt.bind(.int64, 4, std.time.timestamp());
+        stmt.bind(.int64, 4, time_compat.timestamp());
         stmt.bind(.int64, 5, @intCast(tenant.max_users));
         stmt.bind(.int64, 6, @intCast(tenant.max_domains));
         stmt.bind(.int64, 7, @intCast(tenant.max_storage_mb));
