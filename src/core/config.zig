@@ -1,6 +1,7 @@
 const std = @import("std");
 const args = @import("args.zig");
 const config_profiles = @import("config_profiles.zig");
+const toml = @import("toml.zig");
 
 pub const ValidationError = error{
     InvalidPort,
@@ -191,11 +192,35 @@ pub const Config = struct {
     }
 };
 
+/// Standard configuration file locations (in order of priority)
+const CONFIG_FILE_PATHS = [_][]const u8{
+    "./config.toml",
+    "./smtp-server.toml",
+    "/etc/smtp-server/config.toml",
+};
+
 pub fn loadConfig(allocator: std.mem.Allocator, cli_args: args.Args) !Config {
     // Determine which profile to use (from env var or default to development)
     const profile = determineProfile();
 
     var cfg = try loadDefaultsFromProfile(allocator, profile);
+
+    // Try to load from config file (CLI arg takes priority, then standard paths)
+    if (cli_args.config_file) |config_path| {
+        try applyConfigFile(allocator, &cfg, config_path);
+    } else if (std.posix.getenv("SMTP_CONFIG_FILE")) |config_path| {
+        try applyConfigFile(allocator, &cfg, config_path);
+    } else {
+        // Try standard config file locations
+        for (CONFIG_FILE_PATHS) |path| {
+            if (applyConfigFile(allocator, &cfg, path)) {
+                break;
+            } else |_| {
+                // File not found, try next location
+                continue;
+            }
+        }
+    }
 
     // Override with environment variables
     try applyEnvironmentVariables(allocator, &cfg);
@@ -407,5 +432,124 @@ fn applyCommandLineArgs(allocator: std.mem.Allocator, cfg: *Config, cli_args: ar
 
     if (cli_args.enable_auth) |value| {
         cfg.enable_auth = value;
+    }
+}
+
+/// Apply configuration from a TOML file
+fn applyConfigFile(allocator: std.mem.Allocator, cfg: *Config, path: []const u8) !void {
+    var parser = toml.TomlParser.init(allocator);
+    var doc = try parser.parseFile(path);
+    defer doc.deinit();
+
+    std.debug.print("Loaded configuration from: {s}\n", .{path});
+
+    // Apply [server] section
+    if (doc.getSection("server")) |server| {
+        if (server.getString("host")) |value| {
+            allocator.free(cfg.host);
+            cfg.host = try allocator.dupe(u8, value);
+        }
+        if (server.getInt("port")) |value| {
+            cfg.port = @intCast(value);
+        }
+        if (server.getString("hostname")) |value| {
+            allocator.free(cfg.hostname);
+            cfg.hostname = try allocator.dupe(u8, value);
+        }
+        if (server.getInt("max_connections")) |value| {
+            cfg.max_connections = @intCast(value);
+        }
+        if (server.getInt("max_message_size")) |value| {
+            cfg.max_message_size = @intCast(value);
+        }
+        if (server.getInt("max_recipients")) |value| {
+            cfg.max_recipients = @intCast(value);
+        }
+    }
+
+    // Apply [timeouts] section
+    if (doc.getSection("timeouts")) |timeouts| {
+        if (timeouts.getInt("connection")) |value| {
+            cfg.timeout_seconds = @intCast(value);
+        }
+        if (timeouts.getInt("data")) |value| {
+            cfg.data_timeout_seconds = @intCast(value);
+        }
+        if (timeouts.getInt("command")) |value| {
+            cfg.command_timeout_seconds = @intCast(value);
+        }
+        if (timeouts.getInt("greeting")) |value| {
+            cfg.greeting_timeout_seconds = @intCast(value);
+        }
+    }
+
+    // Apply [tls] section
+    if (doc.getSection("tls")) |tls| {
+        if (tls.getBool("enabled")) |value| {
+            cfg.enable_tls = value;
+        }
+        if (tls.getString("cert_path")) |value| {
+            if (cfg.tls_cert_path) |old| allocator.free(old);
+            cfg.tls_cert_path = try allocator.dupe(u8, value);
+        }
+        if (tls.getString("key_path")) |value| {
+            if (cfg.tls_key_path) |old| allocator.free(old);
+            cfg.tls_key_path = try allocator.dupe(u8, value);
+        }
+    }
+
+    // Apply [auth] section
+    if (doc.getSection("auth")) |auth_section| {
+        if (auth_section.getBool("enabled")) |value| {
+            cfg.enable_auth = value;
+        }
+    }
+
+    // Apply [rate_limit] section
+    if (doc.getSection("rate_limit")) |rate_limit| {
+        if (rate_limit.getInt("per_ip")) |value| {
+            cfg.rate_limit_per_ip = @intCast(value);
+        }
+        if (rate_limit.getInt("per_user")) |value| {
+            cfg.rate_limit_per_user = @intCast(value);
+        }
+        if (rate_limit.getInt("cleanup_interval")) |value| {
+            cfg.rate_limit_cleanup_interval = @intCast(value);
+        }
+    }
+
+    // Apply [webhook] section
+    if (doc.getSection("webhook")) |webhook| {
+        if (webhook.getBool("enabled")) |value| {
+            cfg.webhook_enabled = value;
+        }
+        if (webhook.getString("url")) |value| {
+            if (cfg.webhook_url) |old| allocator.free(old);
+            cfg.webhook_url = try allocator.dupe(u8, value);
+        }
+    }
+
+    // Apply [antispam] section
+    if (doc.getSection("antispam")) |antispam| {
+        if (antispam.getBool("dnsbl")) |value| {
+            cfg.enable_dnsbl = value;
+        }
+        if (antispam.getBool("greylist")) |value| {
+            cfg.enable_greylist = value;
+        }
+    }
+
+    // Apply [observability] section
+    if (doc.getSection("observability")) |obs| {
+        if (obs.getBool("tracing")) |value| {
+            cfg.enable_tracing = value;
+        }
+        if (obs.getString("service_name")) |value| {
+            allocator.free(cfg.tracing_service_name);
+            cfg.tracing_service_name = try allocator.dupe(u8, value);
+        }
+        if (obs.getBool("json_logging")) |value| {
+            cfg.enable_json_logging = value;
+        }
     }
 }

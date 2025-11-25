@@ -14,6 +14,39 @@ const logger = @import("../core/logger.zig");
 /// - Automatic retry with exponential backoff
 /// - Resource attribution
 
+/// Trace sampling configuration
+pub const SamplingConfig = struct {
+    /// Sampling strategy
+    strategy: SamplingStrategy = .always_on,
+    /// Sample rate for ratio-based sampling (0.0 to 1.0)
+    sample_rate: f64 = 1.0,
+    /// Rate limit for rate-limiting sampler (traces per second)
+    rate_limit: u32 = 100,
+    /// Parent-based sampling - inherit sampling decision from parent span
+    parent_based: bool = true,
+
+    pub fn shouldSample(self: SamplingConfig, trace_id: [16]u8) bool {
+        return switch (self.strategy) {
+            .always_on => true,
+            .always_off => false,
+            .trace_id_ratio => blk: {
+                // Use first 8 bytes of trace_id as random value
+                const rand_val = std.mem.readInt(u64, trace_id[0..8], .little);
+                const threshold = @as(u64, @intFromFloat(self.sample_rate * @as(f64, std.math.maxInt(u64))));
+                break :blk rand_val < threshold;
+            },
+            .rate_limiting => true, // Rate limiting handled elsewhere
+        };
+    }
+};
+
+pub const SamplingStrategy = enum {
+    always_on, // Sample all traces
+    always_off, // Sample no traces
+    trace_id_ratio, // Sample based on trace ID hash
+    rate_limiting, // Sample up to N traces per second
+};
+
 /// Exporter configuration
 pub const ExporterConfig = struct {
     backend: ExporterBackend = .jaeger_agent,
@@ -25,6 +58,8 @@ pub const ExporterConfig = struct {
     retry_initial_interval_ms: u64 = 1000,
     retry_max_interval_ms: u64 = 30000,
     headers: ?std.StringHashMap([]const u8) = null,
+    /// Sampling configuration
+    sampling: SamplingConfig = .{},
 };
 
 pub const ExporterBackend = enum {
@@ -33,6 +68,7 @@ pub const ExporterBackend = enum {
     datadog_agent, // HTTP to DataDog Agent (8126)
     otlp_grpc, // gRPC to OTLP collector (4317)
     otlp_http, // HTTP to OTLP collector (4318)
+    zipkin, // HTTP to Zipkin collector (9411)
 };
 
 /// Span data for export
@@ -202,6 +238,7 @@ pub const BatchSpanExporter = struct {
             .datadog_agent => try self.exportToDataDogAgent(),
             .otlp_grpc => try self.exportToOtlpGrpc(),
             .otlp_http => try self.exportToOtlpHttp(),
+            .zipkin => try self.exportToZipkin(),
         }
 
         // Clear exported spans
@@ -302,6 +339,23 @@ pub const BatchSpanExporter = struct {
         logger.debug("Exported {d} spans to OTLP HTTP", .{self.spans.items.len});
     }
 
+    /// Export to Zipkin HTTP endpoint
+    fn exportToZipkin(self: *BatchSpanExporter) !void {
+        // Build Zipkin JSON payload (v2 API)
+        var payload = std.ArrayList(u8).init(self.allocator);
+        defer payload.deinit();
+
+        try self.serializeZipkinJson(&payload);
+
+        // Send HTTP POST to Zipkin
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/api/v2/spans", .{self.config.endpoint});
+        defer self.allocator.free(url);
+
+        try self.sendHttpPost(url, payload.items, "application/json");
+
+        logger.debug("Exported {d} spans to Zipkin", .{self.spans.items.len});
+    }
+
     /// Serialize spans to Jaeger Thrift Compact format (simplified)
     fn serializeJaegerThrift(self: *BatchSpanExporter, buffer: *std.ArrayList(u8)) !void {
         const writer = buffer.writer();
@@ -380,6 +434,57 @@ pub const BatchSpanExporter = struct {
         }
 
         try writer.writeAll("]}]}]}");
+    }
+
+    /// Serialize spans to Zipkin JSON format (v2 API)
+    fn serializeZipkinJson(self: *BatchSpanExporter, buffer: *std.ArrayList(u8)) !void {
+        const writer = buffer.writer();
+
+        try writer.writeAll("[");
+
+        for (self.spans.items, 0..) |span, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writer.writeAll("{");
+
+            // Trace ID (32 hex chars)
+            try writer.print("\"traceId\": \"{x}\",", .{std.fmt.fmtSliceHexLower(&span.trace_id)});
+
+            // Span ID (16 hex chars)
+            try writer.print("\"id\": \"{x}\",", .{std.fmt.fmtSliceHexLower(&span.span_id)});
+
+            // Parent span ID (optional)
+            if (span.parent_span_id) |parent_id| {
+                try writer.print("\"parentId\": \"{x}\",", .{std.fmt.fmtSliceHexLower(&parent_id)});
+            }
+
+            // Name
+            try writer.print("\"name\": \"{s}\",", .{span.name});
+
+            // Timestamps (Zipkin uses microseconds)
+            try writer.print("\"timestamp\": {d},", .{@divFloor(span.start_time_ns, 1000)});
+            try writer.print("\"duration\": {d},", .{@divFloor(span.end_time_ns - span.start_time_ns, 1000)});
+
+            // Local endpoint with service name
+            try writer.print("\"localEndpoint\": {{\"serviceName\": \"{s}\"}},", .{self.config.service_name});
+
+            // Kind (default to SERVER for SMTP)
+            try writer.writeAll("\"kind\": \"SERVER\",");
+
+            // Tags from attributes
+            try writer.writeAll("\"tags\": {");
+            var attr_iter = span.attributes.iterator();
+            var first_attr = true;
+            while (attr_iter.next()) |entry| {
+                if (!first_attr) try writer.writeAll(",");
+                first_attr = false;
+                try writer.print("\"{s}\": \"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* });
+            }
+            try writer.writeAll("}");
+
+            try writer.writeAll("}");
+        }
+
+        try writer.writeAll("]");
     }
 
     /// Serialize spans to OTLP Protobuf format (simplified)

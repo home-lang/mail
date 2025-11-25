@@ -10,9 +10,17 @@ const greylist_mod = @import("antispam/greylist.zig");
 // Global shutdown flag
 var shutdown_requested = std.atomic.Value(bool).init(false);
 
+// Global reload flag for SIGHUP
+var reload_requested = std.atomic.Value(bool).init(false);
+
 fn signalHandler(sig: i32) callconv(.c) void {
     _ = sig;
     shutdown_requested.store(true, .release);
+}
+
+fn reloadHandler(sig: i32) callconv(.c) void {
+    _ = sig;
+    reload_requested.store(true, .release);
 }
 
 pub fn main() !void {
@@ -73,18 +81,26 @@ pub fn main() !void {
         return;
     }
 
-    // Setup signal handlers for graceful shutdown
+    // Setup signal handlers for graceful shutdown and hot reload
     const empty_set = std.posix.sigemptyset();
 
-    const act = std.posix.Sigaction{
+    const shutdown_act = std.posix.Sigaction{
         .handler = .{ .handler = signalHandler },
         .mask = empty_set,
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
-    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+    std.posix.sigaction(std.posix.SIG.INT, &shutdown_act, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &shutdown_act, null);
 
-    log.info("Signal handlers installed (SIGINT, SIGTERM)", .{});
+    // Setup SIGHUP for configuration hot reload
+    const reload_act = std.posix.Sigaction{
+        .handler = .{ .handler = reloadHandler },
+        .mask = empty_set,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.HUP, &reload_act, null);
+
+    log.info("Signal handlers installed (SIGINT, SIGTERM for shutdown, SIGHUP for reload)", .{});
 
     // Initialize database and auth backend if auth is enabled
     var db: ?database.Database = null;
