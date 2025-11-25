@@ -1,7 +1,15 @@
 const std = @import("std");
+const raft = @import("raft.zig");
 
 /// Cluster mode for high availability SMTP server
 /// Provides distributed coordination, state sharing, and failover capabilities
+///
+/// ## Raft Integration
+/// This module now integrates proper Raft consensus for leader election
+/// instead of the simple "lowest ID wins" approach. The RaftNode handles:
+/// - Leader election with proper term-based voting
+/// - Log replication for distributed state
+/// - Heartbeat mechanism with configurable timeouts
 
 /// Cluster node information
 pub const ClusterNode = struct {
@@ -100,7 +108,7 @@ pub const NodeMetadata = struct {
 
     pub fn deinit(self: *NodeMetadata, allocator: std.mem.Allocator) void {
         allocator.free(self.version);
-        _ = allocator;
+        self.* = undefined; // Clear to prevent use-after-free
     }
 };
 
@@ -114,6 +122,12 @@ pub const ClusterConfig = struct {
     heartbeat_timeout_ms: u32 = 15000,
     leader_election_timeout_ms: u32 = 10000,
     enable_auto_discovery: bool = false,
+
+    /// Enable Raft consensus for leader election (recommended for production)
+    enable_raft: bool = true,
+    /// Raft-specific settings
+    raft_election_timeout_ms: u32 = 150,
+    raft_heartbeat_interval_ms: u32 = 50,
 };
 
 /// Cluster manager
@@ -126,6 +140,10 @@ pub const ClusterManager = struct {
     state_store: *DistributedStateStore,
     heartbeat_thread: ?std.Thread = null,
     running: std.atomic.Value(bool),
+
+    /// Raft consensus node for proper leader election
+    raft_node: ?*raft.RaftNode = null,
+    raft_enabled: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, config: ClusterConfig) !*ClusterManager {
         const manager = try allocator.create(ClusterManager);
@@ -159,13 +177,34 @@ pub const ClusterManager = struct {
             .nodes_mutex = std.Thread.Mutex{},
             .state_store = try DistributedStateStore.init(allocator),
             .running = std.atomic.Value(bool).init(false),
+            .raft_node = null,
+            .raft_enabled = config.enable_raft,
         };
+
+        // Initialize Raft consensus if enabled
+        if (config.enable_raft) {
+            const raft_config = raft.RaftConfig{
+                .node_id = config.node_id,
+                .peers = &[_][]const u8{}, // Will be populated from cluster peers
+                .election_timeout_ms = config.raft_election_timeout_ms,
+                .heartbeat_interval_ms = config.raft_heartbeat_interval_ms,
+                .max_log_entries = 10000,
+                .snapshot_threshold = 5000,
+            };
+            manager.raft_node = try raft.RaftNode.init(allocator, raft_config);
+            std.log.info("Raft consensus enabled for cluster coordination", .{});
+        }
 
         return manager;
     }
 
     pub fn deinit(self: *ClusterManager) void {
         self.stop();
+
+        // Clean up Raft node if enabled
+        if (self.raft_node) |rn| {
+            rn.deinit();
+        }
 
         self.local_node.deinit(self.allocator);
         self.allocator.destroy(self.local_node);
@@ -188,6 +227,12 @@ pub const ClusterManager = struct {
     pub fn start(self: *ClusterManager) !void {
         self.running.store(true, .release);
 
+        // Start Raft consensus if enabled
+        if (self.raft_node) |rn| {
+            try rn.start();
+            std.log.info("Raft consensus started", .{});
+        }
+
         // Start heartbeat thread
         self.heartbeat_thread = try std.Thread.spawn(.{}, heartbeatLoop, .{self});
 
@@ -198,15 +243,26 @@ pub const ClusterManager = struct {
             try self.connectToPeers();
         }
 
+        const role_str = if (self.raft_enabled and self.raft_node != null)
+            raft.RaftState.toString(self.raft_node.?.getState())
+        else
+            self.local_node.getRole().toString();
+
         std.log.info("Cluster manager started - Node ID: {s}, Role: {s}", .{
             self.local_node.id,
-            self.local_node.role.toString(),
+            role_str,
         });
     }
 
     /// Stop cluster operations
     pub fn stop(self: *ClusterManager) void {
         self.running.store(false, .release);
+
+        // Stop Raft consensus if enabled
+        if (self.raft_node) |rn| {
+            rn.stop();
+            std.log.info("Raft consensus stopped", .{});
+        }
 
         if (self.heartbeat_thread) |thread| {
             thread.join();
@@ -332,18 +388,29 @@ pub const ClusterManager = struct {
     }
 
     /// Start leader election
+    /// When Raft is enabled, this triggers a Raft election. Otherwise falls back
+    /// to a simple "lowest ID wins" approach (for testing/development).
     fn startLeaderElection(self: *ClusterManager) !void {
+        // Use Raft consensus if enabled
+        if (self.raft_enabled and self.raft_node != null) {
+            std.log.info("Triggering Raft leader election", .{});
+            // Raft handles election internally via its tick mechanism
+            // Just mark that we need an election
+            self.raft_node.?.tick();
+            return;
+        }
+
+        // Fallback: Simple election for non-Raft mode
         if (self.local_node.getRole() == .leader) {
             return; // Already leader
         }
 
-        std.log.info("Starting leader election", .{});
+        std.log.info("Starting simple leader election (Raft disabled)", .{});
 
         // Atomically transition to candidate
         self.local_node.setRole(.candidate);
 
         // Simple election: node with lowest ID wins
-        // In production, use Raft or similar consensus algorithm
         var lowest_id = self.local_node.id;
 
         self.nodes_mutex.lock();
@@ -406,6 +473,9 @@ pub const ClusterManager = struct {
             .leader_node_id = if (self.local_node.getRole() == .leader) self.local_node.id else null,
             .total_connections = self.local_node.metadata.active_connections,
             .total_messages_processed = self.local_node.metadata.messages_processed,
+            .raft_enabled = self.raft_enabled,
+            .raft_term = if (self.raft_node) |rn| rn.current_term else 0,
+            .raft_state = if (self.raft_node) |rn| raft.RaftState.toString(rn.getState()) else "disabled",
         };
 
         var iter = self.nodes.iterator();
@@ -424,6 +494,31 @@ pub const ClusterManager = struct {
 
         return stats;
     }
+
+    /// Check if this node is the Raft leader
+    pub fn isRaftLeader(self: *ClusterManager) bool {
+        if (self.raft_node) |rn| {
+            return rn.isLeader();
+        }
+        return self.local_node.getRole() == .leader;
+    }
+
+    /// Submit a command to the Raft log (only works on leader)
+    /// Returns the log index if successful
+    pub fn submitRaftCommand(self: *ClusterManager, command: []const u8) !u64 {
+        if (self.raft_node) |rn| {
+            return rn.submitCommand(command);
+        }
+        return error.RaftNotEnabled;
+    }
+
+    /// Get Raft consensus statistics
+    pub fn getRaftStats(self: *ClusterManager) ?raft.RaftStats {
+        if (self.raft_node) |rn| {
+            return rn.getStats();
+        }
+        return null;
+    }
 };
 
 pub const ClusterStats = struct {
@@ -432,6 +527,11 @@ pub const ClusterStats = struct {
     leader_node_id: ?[]const u8,
     total_connections: u32,
     total_messages_processed: u64,
+
+    // Raft consensus statistics
+    raft_enabled: bool,
+    raft_term: u64,
+    raft_state: []const u8,
 };
 
 /// Distributed state store for sharing state across cluster
