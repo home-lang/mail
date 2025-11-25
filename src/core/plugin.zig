@@ -1,4 +1,5 @@
 const std = @import("std");
+const logger = @import("logger.zig");
 
 /// Plugin System for SMTP Server Extensibility
 /// Provides a flexible plugin architecture for extending server functionality
@@ -392,7 +393,7 @@ pub const PluginManager = struct {
 
         try self.plugins.append(self.allocator, plugin);
 
-        std.debug.print("Loaded plugin: {s}\n", .{metadata.name});
+        logger.info("Loaded plugin: {s}", .{metadata.name});
 
         return plugin;
     }
@@ -417,7 +418,7 @@ pub const PluginManager = struct {
             defer self.allocator.free(full_path);
 
             _ = self.loadPlugin(full_path, null) catch |err| {
-                std.debug.print("Failed to load plugin {s}: {}\n", .{ entry.name, err });
+                logger.err("Failed to load plugin {s}: {}", .{ entry.name, err });
                 continue;
             };
         }
@@ -434,7 +435,7 @@ pub const PluginManager = struct {
                 plugin.deinit();
                 self.allocator.destroy(plugin);
                 _ = self.plugins.orderedRemove(i);
-                std.debug.print("Unloaded plugin: {s}\n", .{plugin_name});
+                logger.info("Unloaded plugin: {s}", .{plugin_name});
                 return;
             }
         }
@@ -451,7 +452,7 @@ pub const PluginManager = struct {
             if (!plugin.handlesHook(hook_type)) continue;
 
             const result = plugin.executeHook(context) catch |err| {
-                std.debug.print("Plugin {s} hook execution failed: {}\n", .{ plugin.metadata.name, err });
+                logger.err("Plugin {s} hook execution failed: {}", .{ plugin.metadata.name, err });
                 continue;
             };
 
@@ -463,7 +464,7 @@ pub const PluginManager = struct {
                     return;
                 },
                 .error_occurred => {
-                    std.debug.print("Plugin {s} returned error during hook execution\n", .{plugin.metadata.name});
+                    logger.err("Plugin {s} returned error during hook execution", .{plugin.metadata.name});
                     continue;
                 },
             }

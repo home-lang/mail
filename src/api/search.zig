@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const database = @import("../storage/database.zig");
+const logger = @import("../core/logger.zig");
 const sqlite = @cImport({
     @cInclude("sqlite3.h");
 });
@@ -108,7 +109,7 @@ pub const MessageSearch = struct {
         ;
 
         self.db.exec(fts_schema) catch |err| {
-            std.debug.print("Warning: Could not enable FTS5: {}\n", .{err});
+            logger.warn("Could not enable FTS5: {}", .{err});
             return false;
         };
 

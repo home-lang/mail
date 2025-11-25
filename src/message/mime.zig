@@ -9,8 +9,11 @@ pub const ContentType = struct {
     parameters: std.StringHashMap([]const u8),
     allocator: std.mem.Allocator,
 
+    /// Typical number of Content-Type parameters for pre-sizing
+    const EXPECTED_PARAM_COUNT = 4;
+
     pub fn init(allocator: std.mem.Allocator) ContentType {
-        return .{
+        var ct = ContentType{
             .media_type = "",
             .media_subtype = "",
             .boundary = null,
@@ -18,6 +21,9 @@ pub const ContentType = struct {
             .parameters = std.StringHashMap([]const u8).init(allocator),
             .allocator = allocator,
         };
+        // Pre-size for typical parameter count
+        ct.parameters.ensureTotalCapacity(EXPECTED_PARAM_COUNT) catch {};
+        return ct;
     }
 
     pub fn deinit(self: *ContentType) void {
@@ -91,13 +97,19 @@ pub const MimePart = struct {
     content_type: ?ContentType,
     allocator: std.mem.Allocator,
 
+    /// Typical number of headers per MIME part for pre-sizing
+    const EXPECTED_PART_HEADER_COUNT = 4;
+
     pub fn init(allocator: std.mem.Allocator) MimePart {
-        return .{
+        var part = MimePart{
             .headers = std.StringHashMap([]const u8).init(allocator),
             .body = "",
             .content_type = null,
             .allocator = allocator,
         };
+        // Pre-size for typical MIME part header count
+        part.headers.ensureTotalCapacity(EXPECTED_PART_HEADER_COUNT) catch {};
+        return part;
     }
 
     pub fn deinit(self: *MimePart) void {

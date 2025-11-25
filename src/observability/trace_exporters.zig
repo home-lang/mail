@@ -1,5 +1,6 @@
 const std = @import("std");
 const tracing = @import("tracing.zig");
+const logger = @import("../core/logger.zig");
 
 /// Distributed Tracing Exporters
 /// Supports exporting traces to Jaeger, DataDog, and other OTLP-compatible backends
@@ -183,7 +184,7 @@ pub const BatchSpanExporter = struct {
 
             if (should_export) {
                 self.flushBatch() catch |err| {
-                    std.debug.print("Error exporting batch: {}\n", .{err});
+                    logger.err("Error exporting trace batch: {}", .{err});
                 };
             }
         }
@@ -235,7 +236,7 @@ pub const BatchSpanExporter = struct {
         // Send via UDP
         _ = try std.posix.sendto(sock, buffer.items, 0, &address.any, address.getOsSockLen());
 
-        std.debug.print("Exported {d} spans to Jaeger Agent\n", .{self.spans.items.len});
+        logger.debug("Exported {d} spans to Jaeger Agent", .{self.spans.items.len});
     }
 
     /// Export to Jaeger Collector via HTTP
@@ -252,7 +253,7 @@ pub const BatchSpanExporter = struct {
 
         try self.sendHttpPost(url, payload.items, "application/json");
 
-        std.debug.print("Exported {d} spans to Jaeger Collector\n", .{self.spans.items.len});
+        logger.debug("Exported {d} spans to Jaeger Collector", .{self.spans.items.len});
     }
 
     /// Export to DataDog Agent via HTTP
@@ -269,7 +270,7 @@ pub const BatchSpanExporter = struct {
 
         try self.sendHttpPost(url, payload.items, "application/json");
 
-        std.debug.print("Exported {d} spans to DataDog Agent\n", .{self.spans.items.len});
+        logger.debug("Exported {d} spans to DataDog Agent", .{self.spans.items.len});
     }
 
     /// Export to OTLP gRPC endpoint
@@ -281,7 +282,7 @@ pub const BatchSpanExporter = struct {
         try self.serializeOtlpProtobuf(&payload);
 
         // Send via gRPC (simplified - would use a proper gRPC client in production)
-        std.debug.print("OTLP gRPC export not yet implemented (would send {d} spans)\n", .{self.spans.items.len});
+        logger.warn("OTLP gRPC export not yet implemented (would send {d} spans)", .{self.spans.items.len});
     }
 
     /// Export to OTLP HTTP endpoint
@@ -298,7 +299,7 @@ pub const BatchSpanExporter = struct {
 
         try self.sendHttpPost(url, payload.items, "application/json");
 
-        std.debug.print("Exported {d} spans to OTLP HTTP\n", .{self.spans.items.len});
+        logger.debug("Exported {d} spans to OTLP HTTP", .{self.spans.items.len});
     }
 
     /// Serialize spans to Jaeger Thrift Compact format (simplified)
@@ -400,7 +401,7 @@ pub const BatchSpanExporter = struct {
         _ = content_type;
         // Simplified HTTP client
         // Production would use proper HTTP client library
-        std.debug.print("[{s}] HTTP POST to {s} with {d} bytes\n", .{ self.config.service_name, url, payload.len });
+        logger.debug("[{s}] HTTP POST to {s} with {d} bytes", .{ self.config.service_name, url, payload.len });
     }
 };
 

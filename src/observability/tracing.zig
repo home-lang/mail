@@ -1,4 +1,5 @@
 const std = @import("std");
+const logger = @import("../core/logger.zig");
 
 /// OpenTelemetry trace context
 pub const TraceContext = struct {
@@ -302,8 +303,8 @@ pub const ConsoleExporter = struct {
         const span_id = try span.context.spanIdHex(self.allocator);
         defer self.allocator.free(span_id);
 
-        std.debug.print(
-            "[TRACE] span={s} trace_id={s} span_id={s} kind={s} status={s} duration_ms={d}\n",
+        logger.debug(
+            "[TRACE] span={s} trace_id={s} span_id={s} kind={s} status={s} duration_ms={d}",
             .{
                 span.name,
                 trace_id,
@@ -316,10 +317,10 @@ pub const ConsoleExporter = struct {
 
         for (span.attributes.items) |attr| {
             switch (attr.value) {
-                .string => |v| std.debug.print("  {s}={s}\n", .{ attr.key, v }),
-                .int => |v| std.debug.print("  {s}={d}\n", .{ attr.key, v }),
-                .float => |v| std.debug.print("  {s}={d}\n", .{ attr.key, v }),
-                .bool => |v| std.debug.print("  {s}={}\n", .{ attr.key, v }),
+                .string => |v| logger.debug("  {s}={s}", .{ attr.key, v }),
+                .int => |v| logger.debug("  {s}={d}", .{ attr.key, v }),
+                .float => |v| logger.debug("  {s}={d}", .{ attr.key, v }),
+                .bool => |v| logger.debug("  {s}={}", .{ attr.key, v }),
             }
         }
     }

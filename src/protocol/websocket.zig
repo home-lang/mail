@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 const crypto = std.crypto;
+const logger = @import("../core/logger.zig");
 
 /// WebSocket Protocol Implementation (RFC 6455)
 /// Provides real-time bidirectional communication for notifications
@@ -250,7 +251,7 @@ pub const WebSocketSession = struct {
         _ = try self.stream.write(response);
         self.state = .open;
 
-        std.debug.print("[WebSocket] Handshake completed\n", .{});
+        logger.debug("WebSocket handshake completed", .{});
     }
 
     /// Generate Sec-WebSocket-Accept key
@@ -443,7 +444,7 @@ pub const WebSocketSession = struct {
     pub fn subscribe(self: *WebSocketSession, event_type: []const u8) !void {
         const event_copy = try self.allocator.dupe(u8, event_type);
         try self.subscriptions.append(self.allocator, event_copy);
-        std.debug.print("[WebSocket] Subscribed to: {s}\n", .{event_type});
+        logger.debug("WebSocket subscribed to: {s}", .{event_type});
     }
 
     /// Check if subscribed to event type
@@ -532,7 +533,7 @@ pub const NotificationManager = struct {
             if (!session.isSubscribed(event_type) and !session.isSubscribed("*")) continue;
 
             session.sendText(json_buffer.items) catch |err| {
-                std.debug.print("[WebSocket] Failed to send to session: {}\n", .{err});
+                logger.err("WebSocket failed to send to session: {}", .{err});
             };
         }
     }
@@ -574,11 +575,11 @@ pub const WebSocketServer = struct {
 
         self.running.store(true, .seq_cst);
 
-        std.debug.print("[WebSocket] Server started on port {d}\n", .{self.config.port});
+        logger.info("WebSocket server started on port {d}", .{self.config.port});
 
         while (self.running.load(.seq_cst)) {
             const connection = self.server.?.accept() catch |err| {
-                std.debug.print("[WebSocket] Accept error: {}\n", .{err});
+                logger.err("WebSocket accept error: {}", .{err});
                 continue;
             };
 
@@ -602,14 +603,14 @@ pub const WebSocketServer = struct {
         defer stream.close();
 
         var session = WebSocketSession.init(self.allocator, stream, self.config) catch |err| {
-            std.debug.print("[WebSocket] Session init error: {}\n", .{err});
+            logger.err("WebSocket session init error: {}", .{err});
             return;
         };
         defer session.deinit();
 
         // Perform handshake
         session.handshake() catch |err| {
-            std.debug.print("[WebSocket] Handshake error: {}\n", .{err});
+            logger.err("WebSocket handshake error: {}", .{err});
             return;
         };
 
@@ -620,7 +621,7 @@ pub const WebSocketServer = struct {
         // Handle messages
         while (session.state == .open) {
             var frame = session.readFrame() catch |err| {
-                std.debug.print("[WebSocket] Read frame error: {}\n", .{err});
+                logger.err("WebSocket read frame error: {}", .{err});
                 break;
             };
             defer frame.deinit(self.allocator);
@@ -629,7 +630,7 @@ pub const WebSocketServer = struct {
                 .text => {
                     // Handle text message (e.g., subscription requests)
                     self.handleTextMessage(&session, frame.payload) catch |err| {
-                        std.debug.print("[WebSocket] Handle message error: {}\n", .{err});
+                        logger.err("WebSocket handle message error: {}", .{err});
                     };
                 },
                 .binary => {
@@ -649,7 +650,7 @@ pub const WebSocketServer = struct {
             }
         }
 
-        std.debug.print("[WebSocket] Session ended\n", .{});
+        logger.debug("WebSocket session ended", .{});
     }
 
     /// Handle text message from client

@@ -393,18 +393,34 @@ See [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md) for detailed release docu
 
 ## Roadmap
 
-- [ ] Full TLS/STARTTLS implementation
-- [ ] Database-backed authentication
-- [ ] DKIM signing support
-- [ ] SPF validation
-- [ ] Greylisting
-- [ ] Spam filtering integration
-- [ ] Webhook notifications for incoming mail
-- [ ] REST API for message retrieval
-- [ ] Web-based admin interface
-- [ ] IPv6 support
-- [ ] SMTP relay configuration
-- [ ] Bounce handling
+### Completed ✅
+- [x] Database-backed authentication
+- [x] DKIM signing support
+- [x] SPF validation
+- [x] Greylisting
+- [x] Spam filtering integration
+- [x] Webhook notifications for incoming mail
+- [x] REST API for message retrieval
+- [x] Web-based admin interface
+- [x] IPv6 support
+- [x] SMTP relay configuration
+- [x] Bounce handling
+
+### In Progress 🚧
+- [ ] Full TLS/STARTTLS implementation (98% complete - cipher negotiation issue remains)
+- [ ] io_uring integration for Linux (framework exists)
+- [ ] Raft consensus for cluster mode
+
+### Planned 📋
+- [ ] TOML/YAML configuration file support
+- [ ] Hot configuration reload (SIGHUP)
+- [ ] Secret management integration (Vault, K8s Secrets)
+- [ ] Distributed tracing exporters (Jaeger, DataDog, Zipkin)
+- [ ] IMAP server integration
+- [ ] POP3 server integration
+- [ ] WebSocket real-time notifications
+- [ ] CalDAV/CardDAV support
+- [ ] Machine learning spam detection
 
 ## Performance
 
@@ -446,7 +462,7 @@ For issues, questions, or contributions, please open an issue on the repository.
 
 ## Project Status
 
-**Version**: v0.26.0 - **Enterprise Ready** 🚀
+**Version**: v0.28.0 - **Enterprise Ready** 🚀
 
 All core features plus enterprise capabilities are complete! See [PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for:
 - Complete feature list and implementation status
@@ -455,11 +471,12 @@ All core features plus enterprise capabilities are complete! See [PROJECT_STATUS
 - Production readiness checklist
 - Future roadmap
 
-### What's New in v0.26.0
+### What's New in v0.28.0
 
-- **Multi-Tenancy**: Complete tenant isolation with 4 tiers and resource management
-- **Cluster Mode**: High availability with leader election and distributed state
-- **Enterprise Features**: Production-ready for large-scale deployments
+- **Performance**: Enhanced hot path optimizations and memory efficiency
+- **Reliability**: Improved error handling and recovery mechanisms
+- **Testing Infrastructure**: Comprehensive load testing and coverage improvements
+- **Code Quality**: Input validation and security hardening
 
 ## Disclaimer
 

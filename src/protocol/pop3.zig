@@ -1,5 +1,6 @@
 const std = @import("std");
 const auth = @import("../auth/auth.zig");
+const logger = @import("../core/logger.zig");
 
 /// POP3 Server Implementation (RFC 1939)
 /// Provides simple mail retrieval via POP3 protocol
@@ -607,17 +608,17 @@ pub const Pop3Server = struct {
 
         self.running.store(true, .monotonic);
 
-        std.debug.print("POP3 server listening on port {d}\n", .{self.config.port});
+        logger.info("POP3 server listening on port {d}", .{self.config.port});
 
         while (self.running.load(.monotonic)) {
             const connection = self.listener.?.accept() catch |err| {
-                std.debug.print("Accept error: {}\n", .{err});
+                logger.err("POP3 accept error: {}", .{err});
                 continue;
             };
 
             // Handle connection (simplified)
             self.handleConnection(connection.stream) catch |err| {
-                std.debug.print("Connection error: {}\n", .{err});
+                logger.err("POP3 connection error: {}", .{err});
                 connection.stream.close();
             };
         }
@@ -653,7 +654,7 @@ pub const Pop3Server = struct {
 
             const line = std.mem.trim(u8, buffer[0..bytes_read], "\r\n");
             const continue_processing = session.processCommand(line, &self.config) catch |err| {
-                std.debug.print("Command processing error: {}\n", .{err});
+                logger.err("POP3 command processing error: {}", .{err});
                 break;
             };
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 const auth = @import("../auth/auth.zig");
+const logger = @import("../core/logger.zig");
 
 /// Microsoft Exchange ActiveSync Implementation
 /// MS-ASHTTP and MS-ASCMD protocols
@@ -644,11 +645,11 @@ pub const ActiveSyncServer = struct {
 
         self.running.store(true, .seq_cst);
 
-        std.debug.print("[ActiveSync] Server started on port {d}\n", .{self.config.port});
+        logger.info("ActiveSync server started on port {d}", .{self.config.port});
 
         while (self.running.load(.seq_cst)) {
             const connection = self.server.?.accept() catch |err| {
-                std.debug.print("[ActiveSync] Accept error: {}\n", .{err});
+                logger.err("ActiveSync accept error: {}", .{err});
                 continue;
             };
 
@@ -672,7 +673,7 @@ pub const ActiveSyncServer = struct {
         defer stream.close();
 
         var session = ActiveSyncSession.init(self.allocator, stream, self.auth_backend) catch |err| {
-            std.debug.print("[ActiveSync] Session init error: {}\n", .{err});
+            logger.err("ActiveSync session init error: {}", .{err});
             return;
         };
         defer session.deinit();
@@ -693,7 +694,7 @@ pub const ActiveSyncServer = struct {
             // Continue handling requests
         }
 
-        std.debug.print("[ActiveSync] Session ended for device: {s}\n", .{session.device_id orelse "unknown"});
+        logger.debug("ActiveSync session ended for device: {s}", .{session.device_id orelse "unknown"});
     }
 };
 

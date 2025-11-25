@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 const auth = @import("../auth/auth.zig");
+const logger = @import("../core/logger.zig");
 
 /// CalDAV/CardDAV Server Implementation
 /// RFC 4791 (CalDAV) and RFC 6352 (CardDAV)
@@ -621,11 +622,11 @@ pub const CalDavServer = struct {
 
         self.running.store(true, .seq_cst);
 
-        std.debug.print("[CalDAV/CardDAV] Server started on port {d}\n", .{self.config.port});
+        logger.info("CalDAV/CardDAV server started on port {d}", .{self.config.port});
 
         while (self.running.load(.seq_cst)) {
             const connection = self.server.?.accept() catch |err| {
-                std.debug.print("[CalDAV/CardDAV] Accept error: {}\n", .{err});
+                logger.err("CalDAV/CardDAV accept error: {}", .{err});
                 continue;
             };
 
@@ -649,7 +650,7 @@ pub const CalDavServer = struct {
         defer stream.close();
 
         var session = CalDavSession.init(self.allocator, stream, self.auth_backend) catch |err| {
-            std.debug.print("[CalDAV/CardDAV] Session init error: {}\n", .{err});
+            logger.err("CalDAV/CardDAV session init error: {}", .{err});
             return;
         };
         defer session.deinit();
@@ -670,7 +671,7 @@ pub const CalDavServer = struct {
             // Continue handling requests
         }
 
-        std.debug.print("[CalDAV/CardDAV] Session ended\n", .{});
+        logger.debug("CalDAV/CardDAV session ended", .{});
     }
 };
 

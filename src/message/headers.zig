@@ -12,10 +12,15 @@ pub const HeaderParser = struct {
         return .{ .allocator = allocator };
     }
 
+    /// Typical number of headers in an email message for pre-sizing
+    const EXPECTED_HEADER_COUNT = 16;
+
     /// Parse email headers from raw data
     /// Returns a hash map of header name -> value
     pub fn parseHeaders(self: *HeaderParser, data: []const u8) !std.StringHashMap([]const u8) {
         var headers = std.StringHashMap([]const u8).init(self.allocator);
+        // Pre-size for typical email header count to reduce reallocations
+        try headers.ensureTotalCapacity(EXPECTED_HEADER_COUNT);
         errdefer {
             var it = headers.iterator();
             while (it.next()) |entry| {

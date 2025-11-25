@@ -1,5 +1,6 @@
 const std = @import("std");
 const auth = @import("../auth/auth.zig");
+const logger = @import("../core/logger.zig");
 
 /// IMAP4rev1 Server Implementation (RFC 3501)
 /// Provides mail retrieval and mailbox management via IMAP protocol
@@ -492,17 +493,17 @@ pub const ImapServer = struct {
 
         self.running.store(true, .monotonic);
 
-        std.debug.print("IMAP server listening on port {d}\n", .{self.config.port});
+        logger.info("IMAP server listening on port {d}", .{self.config.port});
 
         while (self.running.load(.monotonic)) {
             const connection = self.listener.?.accept() catch |err| {
-                std.debug.print("Accept error: {}\n", .{err});
+                logger.err("IMAP accept error: {}", .{err});
                 continue;
             };
 
             // Handle connection in a new thread (simplified)
             self.handleConnection(connection.stream) catch |err| {
-                std.debug.print("Connection error: {}\n", .{err});
+                logger.err("IMAP connection error: {}", .{err});
                 connection.stream.close();
             };
         }
@@ -538,7 +539,7 @@ pub const ImapServer = struct {
 
             const line = std.mem.trim(u8, buffer[0..bytes_read], "\r\n");
             session.processCommand(line) catch |err| {
-                std.debug.print("Command processing error: {}\n", .{err});
+                logger.err("IMAP command processing error: {}", .{err});
                 break;
             };
         }
