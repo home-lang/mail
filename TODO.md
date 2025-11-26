@@ -66,6 +66,38 @@
   - SPF: RFC 7208 algorithm, CIDR matching, mechanism evaluation
   - Cluster: Raft consensus, leader election, heartbeat mechanism
   - Encryption: AES-256-GCM, HKDF key derivation, serialization format
+- ✅ **Distributed Tracing**: Full OTLP exporters (`src/observability/trace_exporters.zig`)
+  - Jaeger Agent/Collector, DataDog Agent, OTLP gRPC/HTTP, Zipkin v2
+  - BatchSpanExporter with configurable batching
+  - TracerProvider with sampling strategies
+  - SMTP-specific span names (SmtpSpans)
+- ✅ **Database Migration Tool**: Automated migrations (`src/storage/migrations.zig`)
+  - MigrationManager with up/down/migrateTo operations
+  - Transaction-wrapped with rollback support
+  - Migration history and validation
+- ✅ **Architecture Decision Records**: Design documentation (`docs/ADR/`)
+  - 6 ADRs: Zig, Argon2id, SQLite, AES-256-GCM, Secrets, Raft
+  - Template and README for future ADRs
+- ✅ **io_uring Integration**: Complete Linux async I/O (`src/infrastructure/io_uring.zig`)
+  - Full io_uring syscall wrapper (setup, enter, register)
+  - SQE/CQE handling for all SMTP operations
+  - AsyncSmtpHandler with connection state management
+  - Support for accept, read, write, recv, send, close operations
+  - Requires Linux 5.1+ kernel
+- ✅ **Multi-Region Support**: Geographic replication and failover (`src/infrastructure/multi_region.zig`)
+  - RegionConfig with geographic coordinates and weights
+  - ReplicationMode: sync, async_immediate, async_batch
+  - MultiRegionManager with region registration and health tracking
+  - Replication event queue with CRC32 checksums
+  - Latency-based region routing with Haversine distance calculation
+  - ConflictResolver with LWW, version vector, and CRDT strategies
+  - Automatic failover with traffic redistribution
+- ✅ **Load Testing Framework**: Comprehensive performance testing (`tests/load_test.zig`)
+  - LoadTestConfig with concurrent connections (up to 10k+)
+  - Metrics collection with percentile calculation (p50, p95, p99)
+  - Throughput measurement and error tracking
+  - JSON output for CI/CD integration
+  - Configurable duration and ramp-up
 - 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset + Backup complete!
 
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
@@ -1286,7 +1318,11 @@
 - [x] **Rate Limiter Optimization**: Replace O(n) cleanup with timestamp bucketing ✅ (`src/auth/security.zig` - O(1) cleanup with time buckets)
 - [x] **Connection Buffer Reuse**: Pre-allocate buffer pools in connection pool ✅ (Integrated with connection_pool.zig)
 - [x] **Vectored I/O**: Implement `writev()` for multi-part responses ✅ (`src/infrastructure/vectored_io.zig` - VectoredWriter and SMTPResponseBuilder)
-- [ ] **io_uring Integration**: Complete io_uring wrapper for Linux in `src/infrastructure/io_uring.zig`
+- [x] **io_uring Integration**: Complete io_uring wrapper for Linux ✅ (`src/infrastructure/io_uring.zig`)
+  - Full syscall integration (setup, enter, register)
+  - SQE/CQE handling for accept, read, write, recv, send, close
+  - AsyncSmtpHandler with connection state management
+  - Requires Linux 5.1+ kernel
 - [ ] **Pre-sized Hash Maps**: Reserve capacity for headers and other maps
 - [ ] **Zero-Copy Optimizations**: Minimize allocation in hot paths
 
@@ -1302,8 +1338,17 @@
 ### Phase 6: Observability & Monitoring
 - [x] **Prometheus Metrics Export**: Add `/metrics` endpoint with comprehensive metrics ✅ (Already implemented in `src/api/health.zig`)
 - [x] **Structured JSON Logging**: Implement JSON log format for aggregation ✅ (`src/core/logger.zig` - LogFormat enum, StructuredLog)
-- [ ] **Distributed Tracing**: Add Jaeger/DataDog OTLP exporters for OpenTelemetry
-- [ ] **Request Tracing**: Add trace spans to individual SMTP commands
+- [x] **Distributed Tracing**: Full OTLP exporters implemented ✅ (`src/observability/trace_exporters.zig`)
+  - Jaeger Agent (UDP), Jaeger Collector (HTTP)
+  - DataDog Agent (HTTP)
+  - OTLP gRPC and HTTP endpoints
+  - Zipkin v2 API
+  - BatchSpanExporter with configurable batch size and timeout
+  - TracerProvider with sampling strategies (always_on, always_off, trace_id_ratio, rate_limiting)
+- [x] **Request Tracing**: SMTP-specific spans defined ✅ (SmtpSpans in `src/observability/trace_exporters.zig`)
+  - CONNECTION, COMMAND, AUTHENTICATION spans
+  - MESSAGE_RECEIVE, MESSAGE_DELIVER spans
+  - DNS_LOOKUP, TLS_HANDSHAKE, SPAM_CHECK, DKIM_VERIFY, SPF_CHECK spans
 - [ ] **Application Metrics**: Track spam/virus stats, auth categorization, bounce rates
 - [x] **Alerting Integration**: Add webhooks for critical events (queue size, error rate) ✅ (`src/observability/alerting.zig`)
   - AlertManager with multiple backends: Slack, Discord, PagerDuty, OpsGenie, Email, Generic webhooks
@@ -1318,7 +1363,10 @@
 - [x] **Security Test Suite**: Create OWASP-based security tests in `tests/security_test.zig` ✅ (35+ OWASP tests covering injection, DoS, access control)
 - [x] **Error Path Testing**: Add tests for failures (DB, network, allocation, timeout) ✅ (`tests/error_path_test.zig` - 40+ error scenarios documented)
 - [x] **Fuzzing Harnesses**: Add structured fuzzing for email, MIME, header parsers ✅ (`tests/fuzz_smtp_protocol.zig`, `tests/fuzz_mime_parser.zig`, `docs/FUZZING.md`)
-- [ ] **Load Testing**: Implement 10k+ concurrent connection tests
+- [x] **Load Testing**: Implement 10k+ concurrent connection tests ✅ (`tests/load_test.zig`)
+  - LoadTestConfig with configurable concurrent connections
+  - Metrics with percentile calculation (p50, p95, p99)
+  - JSON output for CI/CD integration
 - [ ] **Coverage Measurement**: Add coverage tracking and enforce minimum thresholds
 - [ ] **Chaos Engineering**: Add fault injection tests for resilience
 - [ ] **Regression Test Index**: Document past vulnerabilities with test references
@@ -1374,7 +1422,14 @@
   - `src/antispam/spf.zig`: SPF RFC 7208 algorithm, CIDR matching, mechanism evaluation
   - `src/infrastructure/cluster.zig`: Raft consensus, leader election, heartbeat mechanism
   - `src/storage/encryption.zig`: AES-256-GCM, HKDF key derivation, serialization format
-- [ ] **Architecture Decision Records**: Create `docs/ADR/` with design rationale
+- [x] **Architecture Decision Records**: ADRs created in `docs/ADR/` ✅
+  - ADR-001: Zig as primary programming language
+  - ADR-002: Argon2id for password hashing
+  - ADR-003: SQLite as primary database
+  - ADR-004: AES-256-GCM for encryption at rest
+  - ADR-005: Multi-backend secret management
+  - ADR-006: Raft consensus for cluster mode
+  - Template and README for future ADRs
 
 ### Phase 11: Enterprise Features
 - [x] **Audit Trail**: Log all administrative actions (user CRUD, config changes, ACL) ✅
@@ -1393,7 +1448,12 @@
   - CLI commands: create, restore, verify, list
   - Pre-restore backup of current data for safety
   - Recursive directory copying for maildir
-- [ ] **Multi-Region Support**: Design cross-region replication and failover
+- [x] **Multi-Region Support**: Cross-region replication and failover ✅ (`src/infrastructure/multi_region.zig`)
+  - MultiRegionManager with region registration and health tracking
+  - Replication modes: sync, async_immediate, async_batch
+  - Geographic routing with Haversine distance calculation
+  - ConflictResolver with LWW, version vector, CRDT strategies
+  - Automatic failover with traffic redistribution
 - [ ] **Service Dependency Graph**: Track dependencies for graceful degradation
 - [x] **Readiness Probes**: K8s health probes implemented ✅ (`src/api/health.zig`)
   - GET `/ready` or `/readyz` - Readiness probe (connection capacity, database, minimum uptime)
@@ -1401,7 +1461,12 @@
   - GET `/startup` - Startup probe (minimum startup time, database initialized)
   - HTTP 200 OK when healthy, HTTP 503 Service Unavailable when unhealthy
   - JSON response with detailed check status and failure reasons
-- [ ] **Database Migration Tool**: Create automated migration framework
+- [x] **Database Migration Tool**: Automated migration framework implemented ✅ (`src/storage/migrations.zig`)
+  - MigrationManager with up/down/migrateTo operations
+  - Transaction-wrapped migrations with rollback on failure
+  - Migration history tracking in schema_migrations table
+  - Migration validation (version ordering)
+  - Built-in SMTP migrations (users, quotas, message_queue)
 - [x] **Secure Password Reset**: Implement token-based reset with expiration ✅
   - Created `src/auth/password_reset.zig` with secure token generation
   - SHA-256 token hashing (only hashes stored in DB)
