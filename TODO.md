@@ -37,7 +37,16 @@
   - `src/core/hot_reload.zig` - Full hot reload manager
   - Callback notifications for config changes
   - Change logging with restart warnings for port/TLS changes
-- 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset complete!
+- ✅ **Backup/Restore CLI**: Comprehensive backup utility (`src/tools/backup.zig`)
+  - BackupManager with full/database/config/maildir/incremental types
+  - SHA-256 checksum verification for all files
+  - JSON manifest with metadata
+  - CLI: `smtp-backup create|restore|verify|list`
+- ✅ **Config File Support** (Already implemented): Full TOML config parsing
+  - `src/core/toml.zig` - Complete TOML parser
+  - Standard paths: `./config.toml`, `/etc/smtp-server/config.toml`
+  - Priority: CLI > env vars > config file > profile defaults
+- 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset + Backup complete!
 
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
 - ✅ **Phase 4: Performance Optimizations COMPLETED**: All major performance enhancements implemented
@@ -1293,7 +1302,12 @@
 - [x] **Configuration Profiles**: Support dev/test/prod profiles ✅ (`src/core/config_profiles.zig` - full profile system with dev/test/staging/prod)
 - [x] **Startup Validation Mode**: Add `--validate-only` flag for config checking ✅ (`src/main.zig:68-73`, `src/core/args.zig:15,94-95`)
 - [x] **Centralized Defaults**: All defaults loaded from profiles via `loadDefaultsFromProfile()` ✅ (`src/core/config.zig:228-259`)
-- [ ] **Config File Support**: Add TOML/YAML config file parsing
+- [x] **Config File Support**: Add TOML/YAML config file parsing ✅ (`src/core/toml.zig`, `src/core/config.zig`)
+  - Full TOML parser with strings, integers, booleans, floats, arrays, tables
+  - Standard config file paths: `./config.toml`, `/etc/smtp-server/config.toml`
+  - CLI arg: `--config <path>` and env var: `SMTP_CONFIG_FILE`
+  - Priority order: CLI args > env vars > config file > profile defaults
+  - Integrated into `loadConfig()` startup flow
 - [ ] **Secret Management**: Integrate HashiCorp Vault, K8s Secrets, AWS Secrets Manager
 - [x] **Hot Reload**: Implement SIGHUP config reload without restart ✅ (`src/core/hot_reload.zig`)
   - HotReloadManager with callback notifications
@@ -1336,7 +1350,13 @@
   - Database operations in `src/storage/database.zig` (insert, query, count, prune)
   - REST API endpoint: GET /api/audit with filtering (action, actor, severity, pagination)
   - Configurable retention period (default 90 days)
-- [ ] **Backup/Restore CLI**: Create operational backup utility with verification
+- [x] **Backup/Restore CLI**: Create operational backup utility with verification ✅ (`src/tools/backup.zig`)
+  - BackupManager with full/database/config/maildir/incremental backup types
+  - SHA-256 checksum verification for all backed up files
+  - JSON manifest with file metadata (path, size, checksum, modified_at)
+  - CLI commands: create, restore, verify, list
+  - Pre-restore backup of current data for safety
+  - Recursive directory copying for maildir
 - [ ] **Multi-Region Support**: Design cross-region replication and failover
 - [ ] **Service Dependency Graph**: Track dependencies for graceful degradation
 - [ ] **Readiness Probes**: Implement comprehensive K8s readiness checks
