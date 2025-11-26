@@ -46,6 +46,11 @@
   - `src/core/toml.zig` - Complete TOML parser
   - Standard paths: `./config.toml`, `/etc/smtp-server/config.toml`
   - Priority: CLI > env vars > config file > profile defaults
+- ✅ **Alerting Integration** (Already implemented): Multi-backend alerting system
+  - `src/observability/alerting.zig` - Full AlertManager
+  - Backends: Slack, Discord, PagerDuty, OpsGenie, Email, Generic webhooks
+  - Alert rules with threshold/rate conditions
+  - De-duplication and Prometheus Alertmanager support
 - 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset + Backup complete!
 
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
@@ -1285,7 +1290,13 @@
 - [ ] **Distributed Tracing**: Add Jaeger/DataDog OTLP exporters for OpenTelemetry
 - [ ] **Request Tracing**: Add trace spans to individual SMTP commands
 - [ ] **Application Metrics**: Track spam/virus stats, auth categorization, bounce rates
-- [ ] **Alerting Integration**: Add webhooks for critical events (queue size, error rate)
+- [x] **Alerting Integration**: Add webhooks for critical events (queue size, error rate) ✅ (`src/observability/alerting.zig`)
+  - AlertManager with multiple backends: Slack, Discord, PagerDuty, OpsGenie, Email, Generic webhooks
+  - Alert severity levels: info, warning, critical, emergency
+  - Alert categories: performance, security, delivery, system, spam, authentication, queue
+  - Alert rules with threshold and rate conditions
+  - De-duplication support with dedup_key
+  - Prometheus Alertmanager integration
 - [ ] **SLO/SLI Tracking**: Define and track reliability targets
 
 ### Phase 7: Testing & Quality ✅ COMPLETED (2025-10-24)
@@ -1337,7 +1348,10 @@
   - CSRF authentication documentation
   - Health, metrics, users, queue, filters, search, audit, GraphQL endpoints
   - Can be viewed with Swagger UI or imported into Postman
-- [ ] **Algorithm Documentation**: Add detailed comments to SPF, cluster, encryption logic
+- [x] **Algorithm Documentation**: Comprehensive algorithm documentation added ✅
+  - `src/antispam/spf.zig`: SPF RFC 7208 algorithm, CIDR matching, mechanism evaluation
+  - `src/infrastructure/cluster.zig`: Raft consensus, leader election, heartbeat mechanism
+  - `src/storage/encryption.zig`: AES-256-GCM, HKDF key derivation, serialization format
 - [ ] **Architecture Decision Records**: Create `docs/ADR/` with design rationale
 
 ### Phase 11: Enterprise Features
@@ -1359,7 +1373,12 @@
   - Recursive directory copying for maildir
 - [ ] **Multi-Region Support**: Design cross-region replication and failover
 - [ ] **Service Dependency Graph**: Track dependencies for graceful degradation
-- [ ] **Readiness Probes**: Implement comprehensive K8s readiness checks
+- [x] **Readiness Probes**: K8s health probes implemented ✅ (`src/api/health.zig`)
+  - GET `/ready` or `/readyz` - Readiness probe (connection capacity, database, minimum uptime)
+  - GET `/live` or `/livez` - Liveness probe (memory allocation, event loop responsive)
+  - GET `/startup` - Startup probe (minimum startup time, database initialized)
+  - HTTP 200 OK when healthy, HTTP 503 Service Unavailable when unhealthy
+  - JSON response with detailed check status and failure reasons
 - [ ] **Database Migration Tool**: Create automated migration framework
 - [x] **Secure Password Reset**: Implement token-based reset with expiration ✅
   - Created `src/auth/password_reset.zig` with secure token generation

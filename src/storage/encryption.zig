@@ -2,6 +2,143 @@ const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
 const crypto = std.crypto;
 
+// =============================================================================
+// Email Encryption at Rest - AES-256-GCM
+// =============================================================================
+//
+// ## Overview
+// Provides authenticated encryption for email messages stored on disk.
+// Uses AES-256-GCM (Galois/Counter Mode) which provides both confidentiality
+// and integrity protection. Messages cannot be read or tampered with without
+// the encryption key.
+//
+// ## Cryptographic Primitives
+//
+// ### AES-256-GCM
+// - **AES-256**: 256-bit key, 128-bit blocks, 14 rounds
+// - **GCM Mode**: Galois/Counter Mode provides authenticated encryption
+// - **Security Level**: 256-bit (post-quantum resistant for symmetric)
+//
+// ### HKDF-SHA256 (Key Derivation)
+// Derives per-message keys from master key + message ID:
+//
+// ```
+// message_key = HKDF-Extract(master_key, "message:" || message_id)
+// ```
+//
+// This ensures each message has a unique encryption key, providing
+// forward secrecy - compromising one message key doesn't reveal others.
+//
+// ### Argon2id (Password-Based Key Derivation)
+// For deriving master keys from passwords:
+// - Memory-hard: Resistant to GPU/ASIC attacks
+// - Time-hard: Configurable iterations
+// - Hybrid: Combines Argon2i (side-channel resistant) and Argon2d (faster)
+//
+// ## Encryption Algorithm
+//
+// ```
+// 1. Generate random 96-bit nonce (12 bytes)
+//    nonce = crypto.random.bytes(12)
+//
+// 2. Derive message-specific key from master key
+//    message_key = HKDF(master_key, "message:" || message_id)
+//
+// 3. Encrypt plaintext with AES-256-GCM
+//    (ciphertext, tag) = AES-256-GCM.encrypt(
+//        key       = message_key,
+//        nonce     = nonce,
+//        plaintext = message_content,
+//        aad       = empty  // No additional authenticated data
+//    )
+//
+// 4. Return: {ciphertext, nonce, tag[16], key_version}
+// ```
+//
+// ## GCM Authentication Tag
+//
+// The 128-bit (16 byte) authentication tag ensures:
+// - **Integrity**: Any modification to ciphertext is detected
+// - **Authenticity**: Only someone with the key could create valid tag
+//
+// ```
+// If attacker modifies ciphertext:
+//   AES-256-GCM.decrypt(...) → DecryptionFailed
+//   (tag verification fails)
+// ```
+//
+// ## Serialization Format
+//
+// ```
+// ┌──────────┬──────────┬──────────┬────────────────┬──────────────┐
+// │ Version  │  Nonce   │   Tag    │ Ciphertext Len │  Ciphertext  │
+// │ (4 bytes)│(12 bytes)│(16 bytes)│   (4 bytes)    │  (variable)  │
+// └──────────┴──────────┴──────────┴────────────────┴──────────────┘
+//      │          │          │            │               │
+//      │          │          │            │               └── Encrypted message
+//      │          │          │            └── Little-endian u32
+//      │          │          └── GCM auth tag
+//      │          └── Random per-message nonce
+//      └── Key version for rotation
+// ```
+//
+// Minimum size: 4 + 12 + 16 + 4 = 36 bytes
+//
+// ## Key Rotation
+//
+// Key rotation allows changing the master key without re-encrypting
+// all existing messages:
+//
+// ```
+// 1. Generate new master key
+// 2. Increment key_version
+// 3. Store old key in old_keys map
+// 4. New messages use new key
+// 5. Old messages decrypted with version-matched key
+// ```
+//
+// Messages are tagged with key_version to identify which key to use.
+//
+// ## Nonce Uniqueness
+//
+// **CRITICAL**: AES-GCM security requires unique nonce per encryption.
+// Using the same (key, nonce) pair twice allows key recovery attacks.
+//
+// We ensure uniqueness via:
+// 1. Random 96-bit nonces (collision probability ~2^-48 for 2^24 messages)
+// 2. Per-message derived keys (different key = different security domain)
+//
+// ## File Storage Security
+//
+// Encrypted files are stored with:
+// - `.enc` extension to indicate encryption
+// - `chmod 0o600` - Owner read/write only
+// - Time-series directory structure for organization
+//
+// ## Security Properties
+//
+// | Property           | Provided By           | Notes                      |
+// |-------------------|----------------------|----------------------------|
+// | Confidentiality   | AES-256              | 256-bit security           |
+// | Integrity         | GCM Tag              | Tamper detection           |
+// | Authenticity      | GCM Tag              | Key holder verification    |
+// | Forward Secrecy   | Per-message keys     | Via HKDF derivation        |
+// | Key Compromise    | Key rotation         | Version-based migration    |
+//
+// ## Threat Model
+//
+// Protects against:
+// - Physical disk theft
+// - Unauthorized file system access
+// - Database dump exposure
+// - Backup compromise
+//
+// Does NOT protect against:
+// - Compromised master key
+// - Memory scraping while server running
+// - Side-channel attacks on same machine
+// =============================================================================
+
 /// Email encryption at rest using AES-256-GCM
 /// Provides confidentiality and integrity for stored messages
 ///

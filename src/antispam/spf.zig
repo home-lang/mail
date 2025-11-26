@@ -1,5 +1,58 @@
 const std = @import("std");
 
+// =============================================================================
+// SPF (Sender Policy Framework) Implementation - RFC 7208
+// =============================================================================
+//
+// ## Overview
+// SPF is an email authentication method that allows domain owners to specify
+// which mail servers are authorized to send email on behalf of their domain.
+// This prevents email spoofing by verifying the sending server's IP address
+// against the domain's published SPF record in DNS.
+//
+// ## Algorithm Flow
+// 1. Extract the domain from the MAIL FROM address (or HELO if empty)
+// 2. Query DNS for TXT records at the domain
+// 3. Find the record starting with "v=spf1"
+// 4. Evaluate each mechanism in order (left to right)
+// 5. Return the result of the first matching mechanism (or default neutral)
+//
+// ## Mechanism Evaluation Order (RFC 7208 Section 4.6)
+// Mechanisms are evaluated strictly in order. First match wins:
+//
+//   +all    → PASS      (IP is authorized)
+//   -all    → FAIL      (IP is NOT authorized - reject)
+//   ~all    → SOFTFAIL  (IP probably not authorized - accept but mark)
+//   ?all    → NEUTRAL   (No policy assertion)
+//
+// ## Supported Mechanisms
+// - `all`          : Matches all IPs (usually last, with qualifier)
+// - `ip4:x.x.x.x`  : Match specific IPv4 address or CIDR range
+// - `ip6:xxxx::xx` : Match specific IPv6 address or CIDR range
+// - `a`            : Match if IP is in domain's A/AAAA records
+// - `mx`           : Match if IP is in domain's MX records
+// - `include:dom`  : Recursively check another domain's SPF
+//
+// ## CIDR Matching Algorithm
+// For `ip4:192.168.1.0/24`:
+// 1. Parse the IP address from the mechanism (192.168.1.0)
+// 2. Parse the prefix length (24)
+// 3. Create a bitmask: ~0 << (32 - prefix_len) = 0xFFFFFF00
+// 4. Compare: (client_ip & mask) == (network_ip & mask)
+//
+// Example: Client IP 192.168.1.100 vs 192.168.1.0/24
+//   Client:  192.168.1.100 = 0xC0A80164
+//   Network: 192.168.1.0   = 0xC0A80100
+//   Mask:    /24           = 0xFFFFFF00
+//   Client & Mask  = 0xC0A80100
+//   Network & Mask = 0xC0A80100  → MATCH!
+//
+// ## Security Considerations
+// - Limit DNS lookups to 10 to prevent DoS (RFC 7208 Section 4.6.4)
+// - Void lookups (failed DNS) count toward the limit
+// - Handle DNS timeouts gracefully with TempError result
+// =============================================================================
+
 /// SPF validation result
 pub const SPFResult = enum {
     none, // No SPF record found

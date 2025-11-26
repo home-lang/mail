@@ -2,6 +2,128 @@ const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
 const raft = @import("raft.zig");
 
+// =============================================================================
+// Cluster Mode - High Availability SMTP Server
+// =============================================================================
+//
+// ## Overview
+// Provides distributed coordination, state sharing, and automatic failover
+// for running multiple SMTP server instances. This enables horizontal scaling
+// and fault tolerance for enterprise deployments.
+//
+// ## Architecture
+//
+//   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+//   │   Node 1    │────▶│   Node 2    │────▶│   Node 3    │
+//   │  (Leader)   │◀────│ (Follower)  │◀────│ (Follower)  │
+//   └─────────────┘     └─────────────┘     └─────────────┘
+//          │                   │                   │
+//          └───────────────────┴───────────────────┘
+//                        Heartbeat Mesh
+//
+// ## Node Roles
+// - **Leader**: Coordinates cluster activities, handles write operations
+// - **Follower**: Receives replicated state, handles read operations
+// - **Candidate**: Transitional state during leader election
+//
+// ## Leader Election Algorithm
+//
+// ### Raft Consensus (Production - Recommended)
+// When `enable_raft=true`, proper Raft consensus is used:
+//
+// 1. **Election Timeout**: Each follower has a randomized election timeout
+//    (150-300ms by default). If no heartbeat received, timeout fires.
+//
+// 2. **Become Candidate**: Node increments term, votes for itself, and
+//    requests votes from all peers.
+//
+// 3. **Vote Collection**: Each node votes for at most one candidate per term.
+//    Candidate becomes leader if it receives majority of votes.
+//
+// 4. **Term-Based Ordering**: Higher terms always win. This prevents
+//    split-brain scenarios where multiple nodes think they're leader.
+//
+// ### Simple Election (Development/Testing)
+// When `enable_raft=false`, uses deterministic "lowest ID wins":
+//
+// 1. All healthy nodes are considered
+// 2. Node with lexicographically smallest ID becomes leader
+// 3. No network partitions handled - NOT for production use
+//
+// ## Heartbeat Mechanism
+//
+// ```
+// Timeline (heartbeat_interval=5s, timeout=15s):
+//
+// Leader:  ──●────────●────────●────────●────────●──▶
+//             ↓        ↓        ↓        ↓        ↓
+// Follower: ─[✓]─────[✓]─────[✓]─────[✓]─────[✓]─▶
+//            └─ last_heartbeat updated
+//
+// If 15s passes without heartbeat → Node marked disconnected
+// If leader disconnected → Trigger election
+// ```
+//
+// ## State Replication (via DistributedStateStore)
+//
+// Key-value store replicated across cluster nodes:
+// 1. Leader receives write request
+// 2. Leader appends to Raft log (if enabled)
+// 3. Log entry replicated to followers
+// 4. Once majority ACK, entry committed
+// 5. State applied to local store
+//
+// ## Atomic Role Transitions
+//
+// Role changes use Compare-And-Swap (CAS) to prevent race conditions:
+//
+// ```zig
+// // Only succeeds if current role matches expected
+// if (self.local_node.transitionRole(.candidate, .leader)) {
+//     // Successfully became leader
+// }
+// ```
+//
+// This prevents scenarios where two candidates both think they won.
+//
+// ## Cluster-Aware Rate Limiting
+//
+// Rate limits are tracked cluster-wide via DistributedStateStore:
+//
+// 1. Client makes request to any node
+// 2. Node queries distributed counter for client IP
+// 3. Counter incremented atomically across cluster
+// 4. If limit exceeded on any node, all nodes reject
+//
+// This prevents attackers from bypassing rate limits by
+// distributing requests across multiple cluster nodes.
+//
+// ## Node Health Monitoring
+//
+// ```
+// Status Flow:
+// healthy ──▶ degraded ──▶ unhealthy ──▶ disconnected
+//    │                                        │
+//    └────────────────────────────────────────┘
+//                (on reconnect)
+// ```
+//
+// Health checks run every `heartbeat_interval_ms` and examine:
+// - Time since last heartbeat
+// - Node responsiveness
+// - Resource utilization (CPU, memory)
+//
+// ## Configuration Parameters
+//
+// | Parameter                  | Default | Description                    |
+// |---------------------------|---------|--------------------------------|
+// | heartbeat_interval_ms     | 5000    | How often to send heartbeats   |
+// | heartbeat_timeout_ms      | 15000   | When to mark node disconnected |
+// | leader_election_timeout_ms| 10000   | Simple election timeout        |
+// | raft_election_timeout_ms  | 150     | Raft election timeout base     |
+// | raft_heartbeat_interval_ms| 50      | Raft leader heartbeat interval |
+// =============================================================================
+
 /// Cluster mode for high availability SMTP server
 /// Provides distributed coordination, state sharing, and failover capabilities
 ///
