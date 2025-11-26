@@ -98,6 +98,48 @@
   - Throughput measurement and error tracking
   - JSON output for CI/CD integration
   - Configurable duration and ramp-up
+- ✅ **Service Dependency Graph**: Graceful degradation support (`src/infrastructure/dependency_graph.zig`)
+  - ServiceId enum with 25+ service types (SMTP, storage, security, delivery, cluster)
+  - DependencyGraph with service registration and health tracking
+  - Criticality levels: critical, important, optional
+  - Effective health calculation based on dependency chain
+  - DegradationManager for automatic feature disabling
+  - System health report with critical service tracking
+  - JSON status reporting
+- ✅ **SLO/SLI Tracking**: Service reliability tracking (`src/observability/slo.zig`)
+  - SLI types: availability, latency, throughput, error_rate, saturation
+  - SliCollector with atomic counters and latency histograms
+  - Latency percentiles (p50, p90, p95, p99, p999)
+  - SloManager with SLO registration and evaluation
+  - Error budget calculation and burn rate tracking
+  - Default SMTP SLOs: 99.9% availability, p95 <500ms, p99 <1s
+  - Alert callbacks for SLO violations
+  - ErrorBudgetCalculator with time-to-exhaustion projection
+- ✅ **WebSocket Real-time Notifications**: Full RFC 6455 support (`src/protocol/websocket.zig`)
+  - WebSocketServer with connection handling and handshake
+  - Frame parsing (text, binary, ping, pong, close)
+  - NotificationManager with broadcast to subscribed sessions
+  - NotificationEvent types: email, folder, calendar, contact, server events
+  - JSON message format with timestamps
+  - Subscription-based event filtering
+- ✅ **IMAP Server Integration**: RFC 3501 IMAP4rev1 support (`src/protocol/imap.zig`)
+  - ImapServer with connection handling and authentication
+  - 24 IMAP commands (CAPABILITY, LOGIN, SELECT, FETCH, etc.)
+  - Mailbox management with flags and UID support
+  - IDLE support for push notifications (RFC 2177)
+  - Message flags (Seen, Answered, Flagged, Deleted, Draft, Recent)
+- ✅ **Plugin System**: Extensibility framework (`src/core/plugin.zig`)
+  - Dynamic plugin loading (.so, .dylib, .dll)
+  - 19 hook types (message, auth, connection, command, config, lifecycle)
+  - PluginManager with load/unload/enable/disable
+  - Plugin dependency resolution
+  - PluginBuilder helper for creating plugins
+- ✅ **Chaos Engineering**: Fault injection testing (`tests/chaos_test.zig`)
+  - FaultInjector with 16 fault types (network, resource, dependency, timing, data)
+  - 8 predefined chaos scenarios (partition, memory, database, latency, etc.)
+  - ChaosRunner with scenario execution and recovery measurement
+  - Probability-based fault injection
+  - Comprehensive test report generation
 - 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset + Backup complete!
 
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
@@ -1357,7 +1399,11 @@
   - Alert rules with threshold and rate conditions
   - De-duplication support with dedup_key
   - Prometheus Alertmanager integration
-- [ ] **SLO/SLI Tracking**: Define and track reliability targets
+- [x] **SLO/SLI Tracking**: Define and track reliability targets ✅ (`src/observability/slo.zig`)
+  - SliCollector with availability, latency histograms, error rate, saturation
+  - SloManager with SLO registration, evaluation, and alerts
+  - Default SMTP SLOs (99.9% availability, p95/p99 latency, error rate)
+  - Error budget calculation with burn rate and time-to-exhaustion
 
 ### Phase 7: Testing & Quality ✅ COMPLETED (2025-10-24)
 - [x] **Security Test Suite**: Create OWASP-based security tests in `tests/security_test.zig` ✅ (35+ OWASP tests covering injection, DoS, access control)
@@ -1368,7 +1414,10 @@
   - Metrics with percentile calculation (p50, p95, p99)
   - JSON output for CI/CD integration
 - [ ] **Coverage Measurement**: Add coverage tracking and enforce minimum thresholds
-- [ ] **Chaos Engineering**: Add fault injection tests for resilience
+- [x] **Chaos Engineering**: Add fault injection tests for resilience ✅ (`tests/chaos_test.zig`)
+  - FaultInjector with 16 fault types and probability-based injection
+  - 8 chaos scenarios (network partition, memory, database, latency, etc.)
+  - ChaosRunner with recovery measurement and report generation
 - [ ] **Regression Test Index**: Document past vulnerabilities with test references
 
 ### Phase 8: Configuration & Deployment
@@ -1454,7 +1503,11 @@
   - Geographic routing with Haversine distance calculation
   - ConflictResolver with LWW, version vector, CRDT strategies
   - Automatic failover with traffic redistribution
-- [ ] **Service Dependency Graph**: Track dependencies for graceful degradation
+- [x] **Service Dependency Graph**: Track dependencies for graceful degradation ✅ (`src/infrastructure/dependency_graph.zig`)
+  - DependencyGraph with 25+ service types
+  - Criticality levels (critical, important, optional)
+  - Effective health based on dependency chains
+  - DegradationManager for automatic feature disabling
 - [x] **Readiness Probes**: K8s health probes implemented ✅ (`src/api/health.zig`)
   - GET `/ready` or `/readyz` - Readiness probe (connection capacity, database, minimum uptime)
   - GET `/live` or `/livez` - Liveness probe (memory allocation, event loop responsive)
@@ -1527,10 +1580,16 @@
   - [x] Automated backup scheduling
   - [x] Comprehensive test coverage
 - [ ] Migration tools from other servers
-- [ ] Plugin system for extensibility
+- [x] Plugin system for extensibility ✅ (`src/core/plugin.zig`)
+  - Dynamic loading, 19 hook types, PluginManager
 - [x] GraphQL API - completed in v0.29.0
-- [ ] WebSocket real-time notifications
-- [ ] IMAP server integration
+- [x] WebSocket real-time notifications ✅ (`src/protocol/websocket.zig`)
+  - Full RFC 6455 implementation with handshake, frames, ping/pong
+  - NotificationManager with broadcast and subscriptions
+  - Server events for email, folder, calendar, contact, sync, quota
+- [x] IMAP server integration ✅ (`src/protocol/imap.zig`)
+  - RFC 3501 IMAP4rev1 with 24 commands
+  - Mailbox management, flags, IDLE support
 - [ ] POP3 server support
 - [ ] CalDAV/CardDAV support
 - [ ] ActiveSync support
