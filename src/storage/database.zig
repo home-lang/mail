@@ -844,4 +844,277 @@ pub const Database = struct {
 
         return sqlite.sqlite3_changes(self.db);
     }
+
+    // ============================================
+    // Password Reset Token Operations
+    // ============================================
+
+    /// Initialize password reset tokens table
+    pub fn initPasswordResetTable(self: *Database) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql =
+            \\CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+            \\    username TEXT NOT NULL,
+            \\    token_hash TEXT NOT NULL UNIQUE,
+            \\    created_at INTEGER NOT NULL,
+            \\    expires_at INTEGER NOT NULL,
+            \\    used INTEGER DEFAULT 0,
+            \\    used_at INTEGER,
+            \\    ip_address TEXT,
+            \\    FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+            \\);
+            \\CREATE INDEX IF NOT EXISTS idx_reset_token_hash ON password_reset_tokens(token_hash);
+            \\CREATE INDEX IF NOT EXISTS idx_reset_username ON password_reset_tokens(username);
+            \\CREATE INDEX IF NOT EXISTS idx_reset_expires ON password_reset_tokens(expires_at);
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var err_msg: [*c]u8 = null;
+        const rc = sqlite.sqlite3_exec(self.db, sql_z.ptr, null, null, &err_msg);
+        if (rc != sqlite.SQLITE_OK) {
+            if (err_msg != null) {
+                sqlite.sqlite3_free(err_msg);
+            }
+            return DatabaseError.ExecFailed;
+        }
+    }
+
+    /// Password reset token entry
+    pub const ResetTokenEntry = struct {
+        id: i64,
+        username: []const u8,
+        token_hash: []const u8,
+        created_at: i64,
+        expires_at: i64,
+        used: bool,
+        used_at: ?i64,
+        ip_address: ?[]const u8,
+
+        pub fn deinit(self: *ResetTokenEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.username);
+            allocator.free(self.token_hash);
+            if (self.ip_address) |ip| allocator.free(ip);
+        }
+    };
+
+    /// Insert a new password reset token
+    pub fn insertResetToken(
+        self: *Database,
+        username: []const u8,
+        token_hash: []const u8,
+        created_at: i64,
+        expires_at: i64,
+        ip_address: ?[]const u8,
+    ) !i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql =
+            \\INSERT INTO password_reset_tokens (username, token_hash, created_at, expires_at, ip_address)
+            \\VALUES (?1, ?2, ?3, ?4, ?5)
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        const username_z = try self.allocator.dupeZ(u8, username);
+        defer self.allocator.free(username_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 1, username_z.ptr, -1, null);
+
+        const hash_z = try self.allocator.dupeZ(u8, token_hash);
+        defer self.allocator.free(hash_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 2, hash_z.ptr, -1, null);
+
+        _ = sqlite.sqlite3_bind_int64(stmt, 3, created_at);
+        _ = sqlite.sqlite3_bind_int64(stmt, 4, expires_at);
+
+        if (ip_address) |ip| {
+            const ip_z = try self.allocator.dupeZ(u8, ip);
+            defer self.allocator.free(ip_z);
+            _ = sqlite.sqlite3_bind_text(stmt, 5, ip_z.ptr, -1, null);
+        } else {
+            _ = sqlite.sqlite3_bind_null(stmt, 5);
+        }
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_DONE) {
+            return DatabaseError.StepFailed;
+        }
+
+        return sqlite.sqlite3_last_insert_rowid(self.db);
+    }
+
+    /// Get a reset token by its hash
+    pub fn getResetTokenByHash(self: *Database, token_hash: []const u8) !ResetTokenEntry {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql =
+            \\SELECT id, username, token_hash, created_at, expires_at, used, used_at, ip_address
+            \\FROM password_reset_tokens
+            \\WHERE token_hash = ?1
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        const hash_z = try self.allocator.dupeZ(u8, token_hash);
+        defer self.allocator.free(hash_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 1, hash_z.ptr, -1, null);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_ROW) {
+            return DatabaseError.NotFound;
+        }
+
+        const id = sqlite.sqlite3_column_int64(stmt, 0);
+        const username_ptr = sqlite.sqlite3_column_text(stmt, 1);
+        const hash_ptr = sqlite.sqlite3_column_text(stmt, 2);
+        const created_at = sqlite.sqlite3_column_int64(stmt, 3);
+        const expires_at = sqlite.sqlite3_column_int64(stmt, 4);
+        const used = sqlite.sqlite3_column_int64(stmt, 5) != 0;
+        const used_at_type = sqlite.sqlite3_column_type(stmt, 6);
+        const used_at: ?i64 = if (used_at_type == sqlite.SQLITE_NULL) null else sqlite.sqlite3_column_int64(stmt, 6);
+        const ip_ptr = sqlite.sqlite3_column_text(stmt, 7);
+
+        return ResetTokenEntry{
+            .id = id,
+            .username = try self.allocator.dupe(u8, std.mem.span(username_ptr)),
+            .token_hash = try self.allocator.dupe(u8, std.mem.span(hash_ptr)),
+            .created_at = created_at,
+            .expires_at = expires_at,
+            .used = used,
+            .used_at = used_at,
+            .ip_address = if (ip_ptr != null) try self.allocator.dupe(u8, std.mem.span(ip_ptr)) else null,
+        };
+    }
+
+    /// Mark a reset token as used
+    pub fn markResetTokenUsed(self: *Database, token_hash: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const now = time_compat.timestamp();
+        const sql = "UPDATE password_reset_tokens SET used = 1, used_at = ?1 WHERE token_hash = ?2";
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        _ = sqlite.sqlite3_bind_int64(stmt, 1, now);
+
+        const hash_z = try self.allocator.dupeZ(u8, token_hash);
+        defer self.allocator.free(hash_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 2, hash_z.ptr, -1, null);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_DONE) {
+            return DatabaseError.StepFailed;
+        }
+    }
+
+    /// Invalidate all existing reset tokens for a user
+    pub fn invalidateUserResetTokens(self: *Database, username: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql = "UPDATE password_reset_tokens SET used = 1 WHERE username = ?1 AND used = 0";
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        const username_z = try self.allocator.dupeZ(u8, username);
+        defer self.allocator.free(username_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 1, username_z.ptr, -1, null);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_DONE) {
+            return DatabaseError.StepFailed;
+        }
+    }
+
+    /// Prune expired reset tokens
+    pub fn pruneExpiredResetTokens(self: *Database) !i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const now = time_compat.timestamp();
+        const sql = "DELETE FROM password_reset_tokens WHERE expires_at < ?1 OR used = 1";
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        _ = sqlite.sqlite3_bind_int64(stmt, 1, now);
+
+        rc = sqlite.sqlite3_step(stmt);
+        if (rc != sqlite.SQLITE_DONE) {
+            return DatabaseError.StepFailed;
+        }
+
+        return sqlite.sqlite3_changes(self.db);
+    }
+
+    /// Check if user exists (for password reset validation)
+    pub fn userExists(self: *Database, username: []const u8) !bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const sql = "SELECT 1 FROM users WHERE username = ?1";
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        var stmt: ?*sqlite.sqlite3_stmt = null;
+        var rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt, null);
+        if (rc != sqlite.SQLITE_OK) {
+            return DatabaseError.PrepareFailed;
+        }
+        defer _ = sqlite.sqlite3_finalize(stmt);
+
+        const username_z = try self.allocator.dupeZ(u8, username);
+        defer self.allocator.free(username_z);
+        _ = sqlite.sqlite3_bind_text(stmt, 1, username_z.ptr, -1, null);
+
+        rc = sqlite.sqlite3_step(stmt);
+        return rc == sqlite.SQLITE_ROW;
+    }
 };

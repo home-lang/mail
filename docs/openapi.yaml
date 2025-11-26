@@ -1,183 +1,91 @@
 openapi: 3.0.3
 info:
-  title: SMTP Server API
+  title: SMTP Server REST API
   description: |
-    REST API for SMTP server management and monitoring.
+    REST API for managing the Zig SMTP server. Provides endpoints for user management,
+    server monitoring, message queue inspection, filtering rules, audit logs, and more.
 
     ## Authentication
-    Currently uses IP-based access control (localhost only).
-    Future versions will support API keys and OAuth 2.0.
+    Most endpoints require CSRF token validation for state-changing operations (POST, PUT, DELETE).
+    Obtain a CSRF token via `GET /api/csrf-token` and include it in the `X-CSRF-Token` header.
 
-    ## CSRF Protection
-    All state-changing operations (POST, PUT, DELETE) require a CSRF token.
-    Obtain token from `/api/csrf-token` and include in `X-CSRF-Token` header.
-
-    ## Rate Limiting
-    - Default: 100 requests/minute per IP
-    - Header: `X-RateLimit-Remaining: 95`
-    - Exceeded: 429 Too Many Requests
-  version: 0.28.0
+    ## GraphQL Alternative
+    A GraphQL API is also available at `/api/graphql` for user management operations.
+  version: 0.29.0
   contact:
     name: SMTP Server Support
-    url: https://github.com/yourusername/smtp-server
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
 
 servers:
   - url: http://localhost:8080
-    description: Management API
+    description: API Server (default port)
   - url: http://localhost:8081
-    description: Health & Metrics API
+    description: Health Server (metrics and health checks)
 
 tags:
-  - name: Health
-    description: Health checks and monitoring
   - name: Users
     description: User management operations
+  - name: Authentication
+    description: CSRF token and authentication
+  - name: Password Reset
+    description: Secure password reset functionality
   - name: Queue
-    description: Message queue operations
+    description: Message queue management
   - name: Filters
-    description: Content filter management
+    description: Email filtering rules
   - name: Search
-    description: Message search operations
+    description: Message search functionality
   - name: Configuration
     description: Server configuration
   - name: Logs
     description: Server logs
+  - name: Audit
+    description: Audit trail for administrative actions
+  - name: Health
+    description: Health checks and metrics
+  - name: Statistics
+    description: Server statistics
+  - name: GraphQL
+    description: GraphQL API endpoint
 
 paths:
-  /health:
-    get:
-      tags:
-        - Health
-      summary: Health check with dependency monitoring
-      description: Returns server health status including dependency checks for database, filesystem, and memory usage
-      operationId: getHealth
-      servers:
-        - url: http://localhost:8081
-      responses:
-        '200':
-          description: Server is healthy or degraded
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HealthStatus'
-              examples:
-                healthy:
-                  value:
-                    status: healthy
-                    uptime_seconds: 3600
-                    active_connections: 15
-                    max_connections: 100
-                    memory_usage_mb: 45.2
-                    checks:
-                      smtp_server: true
-                      connections_available: true
-                      database: true
-                      filesystem: true
-                    dependencies:
-                      - name: database
-                        healthy: true
-                        response_time_ms: 2.5
-                      - name: filesystem
-                        healthy: true
-                        response_time_ms: 0.8
-        '503':
-          description: Server is unhealthy
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HealthStatus'
-
-  /stats:
-    get:
-      tags:
-        - Health
-      summary: Server statistics
-      description: Returns comprehensive server statistics and metrics
-      operationId: getStats
-      servers:
-        - url: http://localhost:8081
-      responses:
-        '200':
-          description: Statistics retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ServerStats'
-
-  /metrics:
-    get:
-      tags:
-        - Health
-      summary: Prometheus metrics
-      description: Returns metrics in Prometheus exposition format
-      operationId: getMetrics
-      servers:
-        - url: http://localhost:8081
-      responses:
-        '200':
-          description: Metrics retrieved successfully
-          content:
-            text/plain:
-              schema:
-                type: string
-              example: |
-                # HELP smtp_uptime_seconds Server uptime in seconds
-                # TYPE smtp_uptime_seconds gauge
-                smtp_uptime_seconds 3600
-                # HELP smtp_connections_total Total number of connections
-                # TYPE smtp_connections_total counter
-                smtp_connections_total 1523
-
   /api/csrf-token:
     get:
       tags:
-        - Users
-      summary: Generate CSRF token
-      description: Generates a new CSRF token for subsequent state-changing operations
-      operationId: getCsrfToken
+        - Authentication
+      summary: Get CSRF token
+      description: Generates a new CSRF token for use in state-changing requests. Tokens are single-use and expire after 1 hour.
+      operationId: getCSRFToken
       responses:
         '200':
-          description: Token generated successfully
+          description: CSRF token generated successfully
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  token:
-                    type: string
-                    example: a1b2c3d4e5f6g7h8i9j0
+                $ref: '#/components/schemas/CSRFTokenResponse'
 
   /api/users:
     get:
       tags:
         - Users
       summary: List all users
-      description: Returns a list of all registered users
-      operationId: getUsers
+      description: Returns a list of all registered users with their details.
+      operationId: listUsers
       responses:
         '200':
-          description: Users retrieved successfully
+          description: List of users retrieved successfully
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  users:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/User'
-                  total:
-                    type: integer
-                    example: 10
+                $ref: '#/components/schemas/UserListResponse'
 
     post:
       tags:
         - Users
-      summary: Create new user
-      description: Creates a new user account
+      summary: Create a new user
+      description: Creates a new user account with the specified credentials.
       operationId: createUser
       security:
         - csrfToken: []
@@ -193,69 +101,77 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: '#/components/schemas/CreateUserResponse'
         '400':
           description: Invalid request
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: CSRF validation failed
+          description: Invalid or missing CSRF token
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: User already exists
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
 
-  /api/users/{id}:
+  /api/users/{username}:
     get:
       tags:
         - Users
-      summary: Get user by ID
-      description: Returns a single user by ID
-      operationId: getUserById
+      summary: Get a specific user
+      description: Returns details for a single user by username.
+      operationId: getUser
       parameters:
-        - name: id
+        - name: username
           in: path
           required: true
+          description: The username to retrieve
           schema:
-            type: integer
-          description: User ID
+            type: string
+            minLength: 3
+            maxLength: 64
+            pattern: '^[a-zA-Z0-9._-]+$'
       responses:
         '200':
-          description: User retrieved successfully
+          description: User details retrieved successfully
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid username format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: User not found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
 
     put:
       tags:
         - Users
-      summary: Update user
-      description: Updates an existing user
+      summary: Update a user
+      description: Updates user properties such as email, password, or enabled status.
       operationId: updateUser
       security:
         - csrfToken: []
       parameters:
-        - name: id
+        - name: username
           in: path
           required: true
           schema:
-            type: integer
-          description: User ID
+            type: string
       requestBody:
         required: true
         content:
@@ -268,119 +184,228 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: '#/components/schemas/MessageResponse'
         '400':
           description: Invalid request
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: CSRF validation failed
+          description: Invalid or missing CSRF token
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: User not found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
 
     delete:
       tags:
         - Users
-      summary: Delete user
-      description: Deletes a user account
+      summary: Delete a user
+      description: Permanently deletes a user account.
       operationId: deleteUser
       security:
         - csrfToken: []
       parameters:
-        - name: id
+        - name: username
           in: path
           required: true
           schema:
-            type: integer
-          description: User ID
+            type: string
       responses:
-        '204':
+        '200':
           description: User deleted successfully
-        '403':
-          description: CSRF validation failed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Invalid or missing CSRF token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: User not found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/password-reset/request:
+    post:
+      tags:
+        - Password Reset
+      summary: Request password reset
+      description: |
+        Initiates a password reset for the specified username.
+        Returns the same response whether the user exists or not (security measure).
+        In production, the token would be sent via email.
+      operationId: requestPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username:
+                  type: string
+                  description: Username to reset password for
+      responses:
+        '200':
+          description: Reset request processed (same response for existing/non-existing users)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  token:
+                    type: string
+                    description: Reset token (development only - sent via email in production)
+                  expires_in:
+                    type: integer
+                    description: Token expiry in seconds
+
+  /api/password-reset/verify:
+    post:
+      tags:
+        - Password Reset
+      summary: Verify reset token
+      description: Verifies that a password reset token is valid and not expired.
+      operationId: verifyPasswordResetToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  description: The reset token to verify
+      responses:
+        '200':
+          description: Token is valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                  username:
+                    type: string
+                  expires_in:
+                    type: integer
+        '400':
+          description: Token is invalid, expired, or already used
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/password-reset/complete:
+    post:
+      tags:
+        - Password Reset
+      summary: Complete password reset
+      description: Completes the password reset by setting a new password using the reset token.
+      operationId: completePasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token:
+                  type: string
+                  description: The reset token
+                new_password:
+                  type: string
+                  minLength: 8
+                  description: New password (minimum 8 characters)
+      responses:
+        '200':
+          description: Password reset successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  username:
+                    type: string
+        '400':
+          description: Token is invalid, expired, or password too short
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/stats:
+    get:
+      tags:
+        - Statistics
+      summary: Get server statistics
+      description: Returns overall server statistics including queue status and user counts.
+      operationId: getStats
+      responses:
+        '200':
+          description: Statistics retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
 
   /api/queue:
     get:
       tags:
         - Queue
-      summary: Get message queue
-      description: Returns message queue status and pending messages
+      summary: Get message queue status
+      description: Returns the current status of the message delivery queue.
       operationId: getQueue
-      parameters:
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 100
-            maximum: 1000
-          description: Maximum messages to return
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-          description: Pagination offset
-        - name: status
-          in: query
-          schema:
-            type: string
-            enum: [pending, retry, failed]
-          description: Filter by message status
       responses:
         '200':
-          description: Queue retrieved successfully
+          description: Queue status retrieved successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessageQueue'
+                $ref: '#/components/schemas/QueueStatus'
 
   /api/filters:
     get:
       tags:
         - Filters
-      summary: List filter rules
-      description: Returns all content filter rules
-      operationId: getFilters
+      summary: List all filters
+      description: Returns all configured email filtering rules.
+      operationId: listFilters
       responses:
         '200':
           description: Filters retrieved successfully
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  filters:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/FilterRule'
-                  total:
-                    type: integer
+                $ref: '#/components/schemas/FilterListResponse'
 
     post:
       tags:
         - Filters
-      summary: Create filter rule
-      description: Creates a new content filter rule
+      summary: Create a new filter
+      description: Creates a new email filtering rule.
       operationId: createFilter
       security:
         - csrfToken: []
@@ -396,143 +421,191 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/FilterRule'
+                $ref: '#/components/schemas/MessageResponse'
         '400':
-          description: Invalid request
+          description: Invalid filter configuration
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: CSRF validation failed
+          description: Invalid or missing CSRF token
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
 
-  /api/filters/{id}:
+  /api/filters/{filterId}:
     delete:
       tags:
         - Filters
-      summary: Delete filter rule
-      description: Deletes a content filter rule
+      summary: Delete a filter
+      description: Deletes an email filtering rule by ID.
       operationId: deleteFilter
       security:
         - csrfToken: []
       parameters:
-        - name: id
+        - name: filterId
           in: path
           required: true
           schema:
-            type: integer
-          description: Filter ID
+            type: string
       responses:
-        '204':
+        '200':
           description: Filter deleted successfully
-        '403':
-          description: CSRF validation failed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Invalid or missing CSRF token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Filter not found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/search:
     get:
       tags:
         - Search
       summary: Search messages
-      description: Search messages with full-text search
+      description: Performs full-text search across email messages using FTS5.
       operationId: searchMessages
       parameters:
         - name: q
           in: query
           required: true
+          description: Search query string
           schema:
             type: string
-          description: Search query
+        - name: email
+          in: query
+          description: Filter by email address
+          schema:
+            type: string
+        - name: folder
+          in: query
+          description: Filter by folder name
+          schema:
+            type: string
         - name: limit
           in: query
+          description: Maximum number of results (default 100, max 1000)
           schema:
             type: integer
             default: 100
-          description: Maximum results
+            maximum: 1000
         - name: offset
           in: query
+          description: Number of results to skip for pagination
           schema:
             type: integer
             default: 0
-          description: Pagination offset
-        - name: field
+        - name: from_date
           in: query
+          description: Filter messages after this Unix timestamp
           schema:
-            type: string
-            enum: [from, to, subject, body, all]
-          description: Search field
+            type: integer
+            format: int64
+        - name: to_date
+          in: query
+          description: Filter messages before this Unix timestamp
+          schema:
+            type: integer
+            format: int64
+        - name: attachments
+          in: query
+          description: Filter for messages with attachments
+          schema:
+            type: boolean
       responses:
         '200':
-          description: Search completed successfully
+          description: Search results returned successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SearchResults'
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          description: Missing query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Search functionality not enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/search/stats:
     get:
       tags:
         - Search
-      summary: Search index statistics
-      description: Returns search index statistics
+      summary: Get search statistics
+      description: Returns statistics about the search index.
       operationId: getSearchStats
       responses:
         '200':
-          description: Statistics retrieved successfully
+          description: Search statistics retrieved successfully
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SearchStats'
+        '503':
+          description: Search functionality not enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/search/rebuild:
     post:
       tags:
         - Search
       summary: Rebuild search index
-      description: Triggers a rebuild of the search index
+      description: Triggers a rebuild of the full-text search index.
       operationId: rebuildSearchIndex
       security:
         - csrfToken: []
       responses:
-        '202':
-          description: Rebuild started
+        '200':
+          description: Search index rebuilt successfully
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: rebuilding
-                  message:
-                    type: string
-                    example: Search index rebuild started
+                $ref: '#/components/schemas/MessageResponse'
         '403':
-          description: CSRF validation failed
+          description: Invalid or missing CSRF token
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to rebuild index
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Search functionality not enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/config:
     get:
       tags:
         - Configuration
       summary: Get server configuration
-      description: Returns current server configuration (sensitive values redacted)
+      description: Returns current server configuration from environment variables.
       operationId: getConfig
       responses:
         '200':
@@ -540,13 +613,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ServerConfig'
+                $ref: '#/components/schemas/ConfigResponse'
 
     put:
       tags:
         - Configuration
-      summary: Update configuration
-      description: Updates runtime configuration (limited fields)
+      summary: Update server configuration
+      description: Updates server configuration. Note that changes require a server restart to take effect.
       operationId: updateConfig
       security:
         - csrfToken: []
@@ -555,60 +628,226 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UpdateConfigRequest'
+              type: object
+              additionalProperties:
+                type: string
       responses:
         '200':
-          description: Configuration updated successfully
+          description: Configuration update received
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ServerConfig'
-        '400':
-          description: Invalid request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/MessageResponse'
         '403':
-          description: CSRF validation failed
+          description: Invalid or missing CSRF token
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/logs:
     get:
       tags:
         - Logs
       summary: Get server logs
-      description: Returns recent server log entries
+      description: Returns recent server log entries with optional filtering.
       operationId: getLogs
       parameters:
         - name: limit
           in: query
+          description: Maximum number of log lines (default 100, max 1000)
           schema:
             type: integer
             default: 100
             maximum: 1000
-          description: Maximum log entries
         - name: level
           in: query
+          description: Filter by log level
           schema:
             type: string
-            enum: [debug, info, warn, error, critical]
-          description: Filter by log level
-        - name: since
-          in: query
-          schema:
-            type: integer
-          description: Unix timestamp to retrieve logs from
+            enum: [DEBUG, INFO, WARN, ERROR]
       responses:
         '200':
           description: Logs retrieved successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LogEntries'
+                $ref: '#/components/schemas/LogsResponse'
+        '404':
+          description: Log file not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/audit:
+    get:
+      tags:
+        - Audit
+      summary: Query audit log
+      description: Returns audit trail entries for administrative actions with filtering and pagination.
+      operationId: getAuditLog
+      parameters:
+        - name: action
+          in: query
+          description: Filter by action type
+          schema:
+            type: string
+            enum:
+              - USER_CREATED
+              - USER_UPDATED
+              - USER_DELETED
+              - USER_ENABLED
+              - USER_DISABLED
+              - PASSWORD_CHANGED
+              - LOGIN_SUCCESS
+              - LOGIN_FAILED
+              - LOGOUT
+              - SESSION_EXPIRED
+              - CONFIG_UPDATED
+              - CONFIG_RELOADED
+              - RATE_LIMIT_TRIGGERED
+              - ACCESS_DENIED
+              - PERMISSION_CHANGED
+              - SERVER_STARTED
+              - SERVER_STOPPED
+              - BACKUP_CREATED
+              - BACKUP_RESTORED
+              - MESSAGE_SENT
+              - MESSAGE_DELETED
+              - MESSAGE_QUARANTINED
+        - name: actor
+          in: query
+          description: Filter by actor (user or system)
+          schema:
+            type: string
+        - name: severity
+          in: query
+          description: Filter by severity level
+          schema:
+            type: string
+            enum: [INFO, WARNING, IMPORTANT, CRITICAL]
+        - name: limit
+          in: query
+          description: Maximum entries to return (default 100, max 1000)
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+        - name: offset
+          in: query
+          description: Number of entries to skip for pagination
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Audit entries retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditResponse'
+        '500':
+          description: Failed to query audit log
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/graphql:
+    post:
+      tags:
+        - GraphQL
+      summary: GraphQL endpoint
+      description: |
+        Execute GraphQL queries and mutations for user management.
+
+        **Queries:** users, user(username)
+        **Mutations:** createUser, updateUser, deleteUser, changePassword, setUserEnabled
+      operationId: graphql
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GraphQLRequest'
+      responses:
+        '200':
+          description: GraphQL response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphQLResponse'
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Returns the health status of the server including dependency checks. Runs on health server port (default 8081).
+      operationId: healthCheck
+      servers:
+        - url: http://localhost:8081
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Server is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /metrics:
+    get:
+      tags:
+        - Health
+      summary: Prometheus metrics
+      description: Returns server metrics in Prometheus text format. Runs on health server port (default 8081).
+      operationId: getMetrics
+      servers:
+        - url: http://localhost:8081
+      responses:
+        '200':
+          description: Metrics in Prometheus format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /:
+    get:
+      tags:
+        - Administration
+      summary: Admin dashboard
+      description: Serves the web-based administration interface.
+      operationId: adminDashboard
+      responses:
+        '200':
+          description: HTML admin interface
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /admin:
+    get:
+      tags:
+        - Administration
+      summary: Admin dashboard (alias)
+      description: Alias for the admin dashboard.
+      operationId: adminDashboardAlias
+      responses:
+        '200':
+          description: HTML admin interface
+          content:
+            text/html:
+              schema:
+                type: string
 
 components:
   securitySchemes:
@@ -616,78 +855,40 @@ components:
       type: apiKey
       in: header
       name: X-CSRF-Token
-      description: CSRF token obtained from /api/csrf-token
+      description: CSRF token obtained from GET /api/csrf-token
 
   schemas:
-    HealthStatus:
+    ErrorResponse:
       type: object
+      required: [error]
       properties:
-        status:
-          type: string
-          enum: [healthy, degraded, unhealthy]
-        uptime_seconds:
-          type: integer
-        active_connections:
-          type: integer
-        max_connections:
-          type: integer
-        memory_usage_mb:
-          type: number
-          format: float
-        checks:
-          type: object
-          additionalProperties:
-            type: boolean
-        dependencies:
-          type: array
-          items:
-            $ref: '#/components/schemas/DependencyStatus'
-
-    DependencyStatus:
-      type: object
-      properties:
-        name:
-          type: string
-        healthy:
-          type: boolean
-        response_time_ms:
-          type: number
-          format: float
         error:
           type: string
+          description: Error message
 
-    ServerStats:
+    MessageResponse:
       type: object
+      required: [message]
       properties:
-        uptime_seconds:
-          type: integer
-        total_connections:
-          type: integer
-        active_connections:
-          type: integer
-        messages_received:
-          type: integer
-        messages_rejected:
-          type: integer
-        auth_successes:
-          type: integer
-        auth_failures:
-          type: integer
-        rate_limit_hits:
-          type: integer
-        dnsbl_blocks:
-          type: integer
-        greylist_blocks:
-          type: integer
+        message:
+          type: string
+        username:
+          type: string
+
+    CSRFTokenResponse:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: CSRF token to include in X-CSRF-Token header
 
     User:
       type: object
+      required: [username, email, enabled, created_at, last_login]
       properties:
-        id:
-          type: integer
         username:
           type: string
-          format: email
         email:
           type: string
           format: email
@@ -695,31 +896,49 @@ components:
           type: boolean
         created_at:
           type: integer
+          format: int64
           description: Unix timestamp
-        updated_at:
+        last_login:
           type: integer
-          description: Unix timestamp
+          format: int64
+          description: Unix timestamp (0 if never)
+
+    UserListResponse:
+      type: object
+      required: [users, count]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        count:
+          type: integer
 
     CreateUserRequest:
       type: object
-      required:
-        - username
-        - email
-        - password
+      required: [username, email, password]
       properties:
         username:
           type: string
-          format: email
+          minLength: 3
+          maxLength: 64
         email:
           type: string
           format: email
         password:
           type: string
-          format: password
           minLength: 8
-        enabled:
-          type: boolean
-          default: true
+
+    CreateUserResponse:
+      type: object
+      required: [message, username, email]
+      properties:
+        message:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
 
     UpdateUserRequest:
       type: object
@@ -729,208 +948,261 @@ components:
           format: email
         password:
           type: string
-          format: password
           minLength: 8
         enabled:
-          type: boolean
-
-    MessageQueue:
-      type: object
-      properties:
-        queue_size:
-          type: integer
-        messages:
-          type: array
-          items:
-            $ref: '#/components/schemas/QueuedMessage'
-
-    QueuedMessage:
-      type: object
-      properties:
-        id:
-          type: integer
-        from_address:
           type: string
-          format: email
-        to_address:
-          type: string
-          format: email
-        priority:
-          type: integer
-        retry_count:
-          type: integer
-        max_retries:
-          type: integer
-        next_retry_at:
-          type: integer
-          description: Unix timestamp
-        created_at:
-          type: integer
-          description: Unix timestamp
-        last_error:
-          type: string
+          enum: ["true", "false"]
 
-    FilterRule:
+    StatsResponse:
       type: object
+      required: [server, queue, users]
       properties:
-        id:
+        server:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [running, stopping]
+            version:
+              type: string
+        queue:
+          $ref: '#/components/schemas/QueueStatus'
+        users:
+          type: object
+          properties:
+            total:
+              type: integer
+
+    QueueStatus:
+      type: object
+      required: [total, pending, processing, retry]
+      properties:
+        total:
           type: integer
+        pending:
+          type: integer
+        processing:
+          type: integer
+        retry:
+          type: integer
+
+    Filter:
+      type: object
+      required: [name, enabled, action]
+      properties:
         name:
           type: string
-        rule_type:
-          type: string
-          enum: [subject, from, to, body, header]
-        pattern:
-          type: string
-          description: Regular expression pattern
-        action:
-          type: string
-          enum: [reject, quarantine, tag, delete]
-        priority:
-          type: integer
         enabled:
           type: boolean
-        created_at:
-          type: integer
-          description: Unix timestamp
+        action:
+          type: string
+          enum: [accept, reject, forward, discard, tag]
+
+    FilterListResponse:
+      type: object
+      required: [filters]
+      properties:
+        filters:
+          type: array
+          items:
+            $ref: '#/components/schemas/Filter'
 
     CreateFilterRequest:
       type: object
-      required:
-        - name
-        - rule_type
-        - pattern
-        - action
+      required: [name, conditions, action]
       properties:
         name:
           type: string
-        rule_type:
-          type: string
-          enum: [subject, from, to, body, header]
-        pattern:
-          type: string
+        conditions:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [from, to, subject, header, body, size, attachments]
+              value:
+                type: string
         action:
           type: string
-          enum: [reject, quarantine, tag, delete]
-        priority:
-          type: integer
-          default: 0
-        enabled:
-          type: boolean
-          default: true
+          enum: [accept, reject, forward, discard, tag]
 
-    SearchResults:
+    SearchResult:
       type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        message_id:
+          type: string
+        email:
+          type: string
+        sender:
+          type: string
+        subject:
+          type: string
+        snippet:
+          type: string
+        received_at:
+          type: integer
+          format: int64
+        size:
+          type: integer
+        folder:
+          type: string
+        relevance:
+          type: number
+          format: float
+
+    SearchResponse:
+      type: object
+      required: [results, count]
       properties:
         results:
           type: array
           items:
             $ref: '#/components/schemas/SearchResult'
-        total:
+        count:
           type: integer
-        took_ms:
-          type: number
-          format: float
-
-    SearchResult:
-      type: object
-      properties:
-        message_id:
-          type: string
-        from:
-          type: string
-          format: email
-        to:
-          type: array
-          items:
-            type: string
-            format: email
-        subject:
-          type: string
-        timestamp:
-          type: integer
-        score:
-          type: number
-          format: float
 
     SearchStats:
       type: object
       properties:
-        total_documents:
+        total_messages:
           type: integer
-        index_size_mb:
-          type: number
-          format: float
-        last_updated:
+        total_size:
           type: integer
-        avg_search_time_ms:
-          type: number
-          format: float
+          format: int64
+        unique_senders:
+          type: integer
+        total_folders:
+          type: integer
+        oldest_message:
+          type: integer
+          format: int64
+        newest_message:
+          type: integer
+          format: int64
+        fts_enabled:
+          type: boolean
 
-    ServerConfig:
+    ConfigResponse:
       type: object
+      required: [config]
       properties:
-        host:
-          type: string
-        port:
-          type: integer
-        max_connections:
-          type: integer
-        max_message_size:
-          type: integer
-        max_recipients:
-          type: integer
-        enable_tls:
-          type: boolean
-        enable_auth:
-          type: boolean
-        enable_greylist:
-          type: boolean
-        enable_dnsbl:
-          type: boolean
-        rate_limit_per_ip:
-          type: integer
-        rate_limit_per_user:
-          type: integer
+        config:
+          type: object
+          additionalProperties:
+            type: string
 
-    UpdateConfigRequest:
+    LogsResponse:
       type: object
-      properties:
-        max_connections:
-          type: integer
-        enable_greylist:
-          type: boolean
-        enable_dnsbl:
-          type: boolean
-        rate_limit_per_ip:
-          type: integer
-        rate_limit_per_user:
-          type: integer
-
-    LogEntries:
-      type: object
+      required: [logs, count]
       properties:
         logs:
           type: array
           items:
-            $ref: '#/components/schemas/LogEntry'
-        total:
+            type: string
+        count:
           type: integer
 
-    LogEntry:
+    AuditEntry:
       type: object
+      required: [id, timestamp, action, actor, severity]
       properties:
+        id:
+          type: integer
+          format: int64
         timestamp:
           type: integer
-        level:
+          format: int64
+        action:
           type: string
-          enum: [DEBUG, INFO, WARN, ERROR, CRITICAL]
-        message:
+        actor:
           type: string
+        target:
+          type: string
+        target_type:
+          type: string
+        ip_address:
+          type: string
+        details:
+          type: object
+        severity:
+          type: string
+          enum: [INFO, WARNING, IMPORTANT, CRITICAL]
 
-    Error:
+    AuditResponse:
+      type: object
+      required: [entries, count, total, limit, offset]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        count:
+          type: integer
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    GraphQLRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        variables:
+          type: object
+          additionalProperties: true
+
+    GraphQLResponse:
       type: object
       properties:
-        error:
+        data:
+          type: object
+          additionalProperties: true
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              message:
+                type: string
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
           type: string
-          description: Error message
+          enum: [healthy, degraded, unhealthy]
+        uptime:
+          type: integer
+        connections:
+          type: object
+          properties:
+            active:
+              type: integer
+            total:
+              type: integer
+        dependencies:
+          type: object
+          properties:
+            database:
+              type: object
+              properties:
+                status:
+                  type: string
+                response_time_ms:
+                  type: integer
+            filesystem:
+              type: object
+              properties:
+                status:
+                  type: string
+                writable:
+                  type: boolean

@@ -8,6 +8,7 @@ const filter_mod = @import("../message/filter.zig");
 const search_mod = @import("search.zig");
 const graphql = @import("graphql.zig");
 const audit = @import("../features/audit.zig");
+const password_reset = @import("../auth/password_reset.zig");
 
 /// Validate username format
 fn validateUsername(username: []const u8) !void {
@@ -145,6 +146,24 @@ pub const APIServer = struct {
             // GraphQL endpoint doesn't require CSRF (uses its own auth)
             if (std.mem.eql(u8, path, "/api/graphql") or std.mem.eql(u8, path, "/graphql")) {
                 try self.handleGraphQL(stream, request);
+                return;
+            }
+
+            // Password reset request doesn't require CSRF (public endpoint)
+            if (std.mem.eql(u8, path, "/api/password-reset/request")) {
+                try self.handlePasswordResetRequest(stream, request);
+                return;
+            }
+
+            // Password reset verify doesn't require CSRF (uses token auth)
+            if (std.mem.eql(u8, path, "/api/password-reset/verify")) {
+                try self.handlePasswordResetVerify(stream, request);
+                return;
+            }
+
+            // Password reset complete doesn't require CSRF (uses token auth)
+            if (std.mem.eql(u8, path, "/api/password-reset/complete")) {
+                try self.handlePasswordResetComplete(stream, request);
                 return;
             }
 
@@ -1180,6 +1199,244 @@ pub const APIServer = struct {
             self.allocator,
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}",
             .{ json.items.len, json.items },
+        );
+        defer self.allocator.free(response);
+
+        _ = try stream.write(response);
+    }
+
+    // ============================================
+    // Password Reset Endpoints
+    // ============================================
+
+    /// Handle POST /api/password-reset/request
+    /// Request a password reset token for a username
+    fn handlePasswordResetRequest(self: *APIServer, stream: std.net.Stream, request: []const u8) !void {
+        // Extract body
+        const body_start = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
+            return self.sendError(stream, 400, "Invalid request format");
+        };
+        const body = request[body_start + 4 ..];
+
+        // Extract username from JSON body
+        const username = self.extractJsonField(body, "username") catch {
+            return self.sendError(stream, 400, "Missing username field");
+        };
+        defer self.allocator.free(username);
+
+        // Extract IP address from request (for logging)
+        const ip_address = self.extractClientIP(request);
+
+        // Validate username exists (don't reveal if user exists for security)
+        const user_exists = self.db.userExists(username) catch false;
+
+        if (user_exists) {
+            // Generate secure token
+            var random_bytes: [32]u8 = undefined;
+            std.crypto.random.bytes(&random_bytes);
+
+            var token: [64]u8 = undefined;
+            _ = std.fmt.bufPrint(&token, "{s}", .{std.fmt.fmtSliceHexLower(&random_bytes)}) catch unreachable;
+
+            // Hash token for storage
+            var hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(&token, &hash, .{});
+            var token_hash: [64]u8 = undefined;
+            _ = std.fmt.bufPrint(&token_hash, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+
+            const now = time_compat.timestamp();
+            const expires_at = now + 3600; // 1 hour expiry
+
+            // Invalidate existing tokens for this user
+            self.db.invalidateUserResetTokens(username) catch {};
+
+            // Store the hashed token
+            _ = self.db.insertResetToken(username, &token_hash, now, expires_at, ip_address) catch {
+                return self.sendError(stream, 500, "Failed to create reset token");
+            };
+
+            // In production, send the token via email
+            // For now, return it in response (DEVELOPMENT ONLY - remove in production!)
+            const json = try std.fmt.allocPrint(
+                self.allocator,
+                \\{{"message":"Password reset requested. Check your email for the reset link.","token":"{s}","expires_in":3600}}
+            ,
+                .{token},
+            );
+            defer self.allocator.free(json);
+
+            try self.sendJSONResponse(stream, 200, json);
+        } else {
+            // Return same message to not reveal if user exists
+            const json = "{\"message\":\"Password reset requested. Check your email for the reset link.\"}";
+            try self.sendJSONResponse(stream, 200, json);
+        }
+    }
+
+    /// Handle POST /api/password-reset/verify
+    /// Verify a reset token is valid
+    fn handlePasswordResetVerify(self: *APIServer, stream: std.net.Stream, request: []const u8) !void {
+        // Extract body
+        const body_start = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
+            return self.sendError(stream, 400, "Invalid request format");
+        };
+        const body = request[body_start + 4 ..];
+
+        // Extract token from JSON body
+        const token = self.extractJsonField(body, "token") catch {
+            return self.sendError(stream, 400, "Missing token field");
+        };
+        defer self.allocator.free(token);
+
+        // Hash the provided token
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(token, &hash, .{});
+        var token_hash: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&token_hash, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+
+        // Look up token
+        var reset_token = self.db.getResetTokenByHash(&token_hash) catch {
+            return self.sendError(stream, 400, "Invalid or expired token");
+        };
+        defer reset_token.deinit(self.allocator);
+
+        const now = time_compat.timestamp();
+
+        // Check if token is valid
+        if (reset_token.used) {
+            return self.sendError(stream, 400, "Token has already been used");
+        }
+        if (now > reset_token.expires_at) {
+            return self.sendError(stream, 400, "Token has expired");
+        }
+
+        // Token is valid
+        const json = try std.fmt.allocPrint(
+            self.allocator,
+            \\{{"valid":true,"username":"{s}","expires_in":{d}}}
+        ,
+            .{ reset_token.username, reset_token.expires_at - now },
+        );
+        defer self.allocator.free(json);
+
+        try self.sendJSONResponse(stream, 200, json);
+    }
+
+    /// Handle POST /api/password-reset/complete
+    /// Complete password reset with new password
+    fn handlePasswordResetComplete(self: *APIServer, stream: std.net.Stream, request: []const u8) !void {
+        // Extract body
+        const body_start = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
+            return self.sendError(stream, 400, "Invalid request format");
+        };
+        const body = request[body_start + 4 ..];
+
+        // Extract token and new password from JSON body
+        const token = self.extractJsonField(body, "token") catch {
+            return self.sendError(stream, 400, "Missing token field");
+        };
+        defer self.allocator.free(token);
+
+        const new_password = self.extractJsonField(body, "new_password") catch {
+            return self.sendError(stream, 400, "Missing new_password field");
+        };
+        defer self.allocator.free(new_password);
+
+        // Validate password strength
+        if (new_password.len < 8) {
+            return self.sendError(stream, 400, "Password must be at least 8 characters");
+        }
+
+        // Hash the provided token
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(token, &hash, .{});
+        var token_hash: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&token_hash, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+
+        // Look up and validate token
+        var reset_token = self.db.getResetTokenByHash(&token_hash) catch {
+            return self.sendError(stream, 400, "Invalid or expired token");
+        };
+        defer reset_token.deinit(self.allocator);
+
+        const now = time_compat.timestamp();
+
+        if (reset_token.used) {
+            return self.sendError(stream, 400, "Token has already been used");
+        }
+        if (now > reset_token.expires_at) {
+            return self.sendError(stream, 400, "Token has expired");
+        }
+
+        // Hash the new password
+        const password_mod = @import("../auth/password.zig");
+        const hashed_password = password_mod.hashPassword(self.allocator, new_password) catch {
+            return self.sendError(stream, 500, "Failed to hash password");
+        };
+        defer self.allocator.free(hashed_password);
+
+        // Update the user's password
+        self.db.updateUserPassword(reset_token.username, hashed_password) catch {
+            return self.sendError(stream, 500, "Failed to update password");
+        };
+
+        // Mark token as used
+        self.db.markResetTokenUsed(&token_hash) catch {};
+
+        // Return success
+        const json = try std.fmt.allocPrint(
+            self.allocator,
+            \\{{"message":"Password reset successful","username":"{s}"}}
+        ,
+            .{reset_token.username},
+        );
+        defer self.allocator.free(json);
+
+        try self.sendJSONResponse(stream, 200, json);
+    }
+
+    /// Extract client IP from request headers
+    fn extractClientIP(self: *APIServer, request: []const u8) ?[]const u8 {
+        _ = self;
+        var lines = std.mem.splitSequence(u8, request, "\r\n");
+        _ = lines.next(); // Skip request line
+
+        while (lines.next()) |line| {
+            if (line.len == 0) break;
+
+            // Check X-Forwarded-For header
+            if (std.mem.startsWith(u8, line, "X-Forwarded-For: ")) {
+                const value = std.mem.trim(u8, line[17..], " \t");
+                // Return first IP in the list
+                if (std.mem.indexOf(u8, value, ",")) |comma_pos| {
+                    return value[0..comma_pos];
+                }
+                return value;
+            }
+            // Check X-Real-IP header
+            if (std.mem.startsWith(u8, line, "X-Real-IP: ")) {
+                return std.mem.trim(u8, line[11..], " \t");
+            }
+        }
+        return null;
+    }
+
+    /// Send JSON response with status code
+    fn sendJSONResponse(self: *APIServer, stream: std.net.Stream, status_code: u16, json: []const u8) !void {
+        const status_text = switch (status_code) {
+            200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
+            403 => "Forbidden",
+            404 => "Not Found",
+            500 => "Internal Server Error",
+            else => "OK",
+        };
+
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ status_code, status_text, json.len, json },
         );
         defer self.allocator.free(response);
 

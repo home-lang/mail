@@ -20,7 +20,24 @@
   - REST API: GET /api/audit with filters (action, actor, severity, limit, offset)
   - Pagination support with total count
   - Configurable retention period (default 90 days)
-- 🎉 **Enterprise Milestone**: Phase 11 Enterprise Features progress - Audit Trail complete!
+- ✅ **OpenAPI Specification**: Complete REST API documentation
+  - Created `docs/openapi.yaml` with OpenAPI 3.0.3 spec
+  - All 20+ REST endpoints documented
+  - Full request/response schemas
+  - CSRF authentication flow documented
+  - Compatible with Swagger UI and Postman
+- ✅ **Secure Password Reset**: Token-based password reset system
+  - Created `src/auth/password_reset.zig` with OWASP-compliant implementation
+  - SHA-256 token hashing (plaintext tokens never stored)
+  - Configurable 1-hour token expiration
+  - Single-use tokens with automatic invalidation
+  - REST API: `/api/password-reset/{request,verify,complete}`
+  - IP address logging for security audit
+- ✅ **Hot Reload** (Already implemented): SIGHUP-triggered config reload
+  - `src/core/hot_reload.zig` - Full hot reload manager
+  - Callback notifications for config changes
+  - Change logging with restart warnings for port/TLS changes
+- 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset complete!
 
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
 - ✅ **Phase 4: Performance Optimizations COMPLETED**: All major performance enhancements implemented
@@ -1278,7 +1295,11 @@
 - [x] **Centralized Defaults**: All defaults loaded from profiles via `loadDefaultsFromProfile()` ✅ (`src/core/config.zig:228-259`)
 - [ ] **Config File Support**: Add TOML/YAML config file parsing
 - [ ] **Secret Management**: Integrate HashiCorp Vault, K8s Secrets, AWS Secrets Manager
-- [ ] **Hot Reload**: Implement SIGHUP config reload without restart
+- [x] **Hot Reload**: Implement SIGHUP config reload without restart ✅ (`src/core/hot_reload.zig`)
+  - HotReloadManager with callback notifications
+  - SIGHUP signal handler in main.zig
+  - Config change logging with restart warnings
+  - Reload statistics tracking
 - [ ] **Kubernetes Tuning**: Add resource limits and network policy documentation
 
 ### Phase 9: Code Quality & Consistency
@@ -1296,7 +1317,12 @@
 - [x] **Troubleshooting Guide**: Document common errors and solutions ✅ (`docs/TROUBLESHOOTING.md` - Complete guide with diagnostics and solutions)
 - [x] **Configuration Reference**: Complete reference with defaults and tuning guidance ✅ (`docs/CONFIGURATION.md` - Enhanced with profile comparison table, environment variable reference, tuning recommendations for different deployment sizes)
 - [x] **Fuzzing Documentation**: Document fuzzing setup and procedures ✅ (`docs/FUZZING.md` - libFuzzer, AFL, OSS-Fuzz integration guides)
-- [ ] **OpenAPI Specification**: Add Swagger/OpenAPI docs for REST API
+- [x] **OpenAPI Specification**: Add Swagger/OpenAPI docs for REST API ✅ (`docs/openapi.yaml`)
+  - OpenAPI 3.0.3 specification with all 20+ REST endpoints
+  - Full schema definitions for requests/responses
+  - CSRF authentication documentation
+  - Health, metrics, users, queue, filters, search, audit, GraphQL endpoints
+  - Can be viewed with Swagger UI or imported into Postman
 - [ ] **Algorithm Documentation**: Add detailed comments to SPF, cluster, encryption logic
 - [ ] **Architecture Decision Records**: Create `docs/ADR/` with design rationale
 
@@ -1315,7 +1341,16 @@
 - [ ] **Service Dependency Graph**: Track dependencies for graceful degradation
 - [ ] **Readiness Probes**: Implement comprehensive K8s readiness checks
 - [ ] **Database Migration Tool**: Create automated migration framework
-- [ ] **Secure Password Reset**: Implement token-based reset with expiration
+- [x] **Secure Password Reset**: Implement token-based reset with expiration ✅
+  - Created `src/auth/password_reset.zig` with secure token generation
+  - SHA-256 token hashing (only hashes stored in DB)
+  - 1-hour token expiration with configurable duration
+  - Database operations in `src/storage/database.zig`
+  - REST API endpoints:
+    - POST `/api/password-reset/request` - Request reset token
+    - POST `/api/password-reset/verify` - Verify token validity
+    - POST `/api/password-reset/complete` - Complete reset with new password
+  - Security features: rate limiting, IP logging, single-use tokens
 
 ### Quick Wins (Low Effort, High Impact) ⚡
 - [x] Remove unreachable blocks - Replace with proper error types (30 min) ✅
