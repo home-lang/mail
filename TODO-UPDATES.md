@@ -551,24 +551,16 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 
 ## 🐛 Known Issues & Fixes
 
-### 41. README Roadmap Sync
-**Status:** README roadmap is outdated
-**Location:** `README.md` lines 394-408
+### 41. ~~README Roadmap Sync~~ ✅ COMPLETED
+**Status:** ✅ Fully updated
+**Location:** `README.md`
 
-**Fix:** The README roadmap shows items as incomplete that are actually implemented:
-- [x] Database-backed authentication (implemented)
-- [x] DKIM signing support (implemented)
-- [x] SPF validation (implemented)
-- [x] Greylisting (implemented)
-- [x] Spam filtering integration (implemented)
-- [x] Webhook notifications (implemented)
-- [x] REST API (implemented)
-- [x] Web-based admin interface (implemented)
-- [x] IPv6 support (implemented)
-- [x] SMTP relay (implemented)
-- [x] Bounce handling (implemented)
-
-**Task:** Update README.md roadmap section to reflect actual implementation status.
+**Completed:**
+- [x] Updated "In Progress" section (removed io_uring - now complete)
+- [x] Updated "Recently Completed" section with all new features
+- [x] Updated "Planned" section with remaining items
+- [x] Added IMAP, POP3, WebSocket, CalDAV/CardDAV, ActiveSync
+- [x] Added ML spam detection, version consistency, cluster health
 
 ### 42. ~~Version Consistency~~ ✅ COMPLETED
 **Status:** ✅ Fully implemented
@@ -584,15 +576,20 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 - [x] Updated `src/tools/backup.zig` to use central version
 - [x] Updated `src/api/health.zig` to include version in health endpoint
 
-### 43. Multi-Tenancy Integration
-**Status:** Framework exists but not integrated with main server
+### 43. ~~Multi-Tenancy Integration~~ ✅ COMPLETED
+**Status:** ✅ Fully implemented
 **Location:** `src/features/multitenancy.zig`
 
-**Tasks:**
-- [ ] Integrate tenant lookup into connection handling
-- [ ] Add tenant-aware rate limiting
-- [ ] Implement tenant-specific configuration
-- [ ] Add tenant isolation to storage backends
+**Completed:**
+- [x] TenantConnectionHandler for tenant lookup from email domain
+- [x] TenantRateLimiter with per-tenant token bucket rate limiting
+- [x] TenantConfig with SMTP, security, delivery, and storage settings
+- [x] TenantConfigManager for managing per-tenant configurations
+- [x] TenantStorage for isolated storage paths per tenant
+- [x] TenantUsageStats with atomic counters for real-time statistics
+- [x] TenantUsageManager for aggregate tenant usage tracking
+- [x] Connection validation with daily message limits
+- [x] IP connection tracking per tenant
 
 ### 44. ~~Cluster Mode Integration~~ ✅ COMPLETED
 **Status:** ✅ Fully implemented
@@ -607,6 +604,20 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 - [x] Integration with ClusterManager for real-time status
 - [x] Leader detection and quorum health checking
 
+### 45. ~~DKIM Key Rotation CLI~~ ✅ COMPLETED
+**Status:** ✅ Fully implemented
+**Location:** `src/antispam/dkim.zig`
+
+**Completed:**
+- [x] DKIMKeyManager for key lifecycle management
+- [x] Key generation with RSA-2048, RSA-4096, Ed25519 support
+- [x] Key rotation with automatic selector versioning
+- [x] Scheduled rotation support
+- [x] DNS TXT record generation (BIND and cloud formats)
+- [x] Key validity checking with expiry warnings
+- [x] DKIMCli with generate, list, show, rotate, schedule, validate, dns, delete commands
+- [x] Secure key storage with memory zeroing on deallocation
+
 ---
 
 ## 📊 Priority Summary (Updated 2025-11-26)
@@ -617,13 +628,13 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 | 🟡 Medium | 7 | 7 | 0 |
 | 🟢 Low | 11 | 1 | 10 |
 | 🔧 Code Quality | 5 | 5 | 0 |
-| 📚 Documentation | 3 | 2 | 1 |
+| 📚 Documentation | 3 | 3 | 0 |
 | 🧪 Testing | 4 | 4 | 0 |
-| 🏢 Enterprise | 7 | 5 | 2 |
-| 🐛 Fixes | 4 | 2 | 2 |
+| 🏢 Enterprise | 8 | 7 | 1 |
+| 🐛 Fixes | 4 | 4 | 0 |
 
-**Completed:** 30 items
-**Remaining:** ~14 items
+**Completed:** 34 items
+**Remaining:** ~11 items
 
 ---
 

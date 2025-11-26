@@ -414,19 +414,24 @@ See [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md) for detailed release docu
 
 ### In Progress 🚧
 - [ ] Full TLS/STARTTLS implementation (98% complete - cipher negotiation issue remains)
-- [ ] io_uring integration for Linux (framework exists)
 
 ### Recently Completed 🎉
 - [x] TOML configuration file support
 - [x] Hot configuration reload (SIGHUP)
 - [x] Distributed tracing exporters (Jaeger, DataDog, Zipkin, OTLP)
+- [x] io_uring integration for Linux
+- [x] IMAP server integration (IMAP4rev1, 24 commands)
+- [x] POP3 server integration
+- [x] WebSocket real-time notifications
+- [x] CalDAV/CardDAV support
+- [x] ActiveSync protocol support
+- [x] Machine learning spam detection
+- [x] Version consistency (central version module)
+- [x] Cluster health monitoring integration
 
 ### Planned 📋
-- [ ] IMAP server integration
-- [ ] POP3 server integration
-- [ ] WebSocket real-time notifications
-- [ ] CalDAV/CardDAV support
-- [ ] Machine learning spam detection
+- [ ] Full native TLS cipher negotiation
+- [ ] Additional ML model training pipelines
 
 ## Performance
 
