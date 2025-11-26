@@ -140,6 +140,41 @@
   - ChaosRunner with scenario execution and recovery measurement
   - Probability-based fault injection
   - Comprehensive test report generation
+- ✅ **POP3 Server Support**: RFC 1939 POP3 protocol (`src/protocol/pop3.zig`)
+  - Pop3Server with connection handling and authentication
+  - 11 POP3 commands (USER, PASS, STAT, LIST, RETR, DELE, RSET, NOOP, TOP, UIDL, QUIT)
+  - Mailbox locking and message deletion
+  - SSL/TLS support (POP3S on port 995)
+- ✅ **Coverage Measurement**: Test coverage tracking (`src/tools/coverage.zig`)
+  - CoverageCollector with line/branch/function tracking
+  - Configurable thresholds (production, development, strict)
+  - ReportGenerator with 5 formats (text, JSON, HTML, LCOV, Cobertura)
+  - CoverageEnforcer for CI/CD threshold enforcement
+  - Exclusion patterns for test/vendor directories
+- ✅ **Server Migration Tools**: Multi-server import (`src/tools/server_migration.zig`)
+  - 8 source types: Postfix, Sendmail, Dovecot, Exim, Qmail, Courier, Maildir, mbox
+  - PostfixParser and DovecotParser for config extraction
+  - MaildirImporter with flag parsing
+  - MboxImporter with message splitting
+  - MigrationManager with statistics and error tracking
+- ✅ **CalDAV/CardDAV Support**: Calendar & contacts sync (`src/protocol/caldav.zig`)
+  - RFC 4791 CalDAV and RFC 6352 CardDAV
+  - CalDavServer with session management and authentication
+  - 12 HTTP methods (GET, PUT, PROPFIND, PROPPATCH, MKCALENDAR, REPORT, etc.)
+  - iCalendar (VEVENT, VTODO) and vCard resource handling
+  - Calendar/addressbook query reports
+- ✅ **ActiveSync Support**: Mobile device sync (`src/protocol/activesync.zig`)
+  - MS-ASHTTP and MS-ASCMD protocols (v2.5 to v16.1)
+  - ActiveSyncServer with 23 commands (Sync, FolderSync, Ping, SendMail, etc.)
+  - Folder types for inbox, calendar, contacts, tasks
+  - Device provisioning and policy management
+  - Push notification support via Ping
+- ✅ **Regression Test Index**: Bug documentation (`docs/REGRESSION_TESTS.md`)
+  - 21 documented regressions across 8 categories
+  - Security vulnerabilities (SEC-001 to SEC-004)
+  - Protocol bugs, auth issues, memory safety
+  - Concurrency bugs, input validation, resource exhaustion
+  - Integration issues with test references
 - 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset + Backup complete!
 
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
@@ -1365,8 +1400,18 @@
   - SQE/CQE handling for accept, read, write, recv, send, close
   - AsyncSmtpHandler with connection state management
   - Requires Linux 5.1+ kernel
-- [ ] **Pre-sized Hash Maps**: Reserve capacity for headers and other maps
-- [ ] **Zero-Copy Optimizations**: Minimize allocation in hot paths
+- [x] **Pre-sized Hash Maps**: Reserve capacity for headers and other maps ✅ (`src/core/presized_maps.zig`)
+  - PresizedStringHashMap and PresizedAutoHashMap with ensureTotalCapacity
+  - HeaderMap (case-insensitive, ordered), RecipientSet (deduplicated)
+  - SessionMap (expiration), DnsCache (TTL), ConnectionPoolMap
+  - Capacity constants based on RFC specs and real-world patterns
+- [x] **Zero-Copy Optimizations**: Minimize allocation in hot paths ✅ (`src/core/zero_copy.zig`)
+  - BufferView with slicing, splitting, search (no allocation)
+  - RingBuffer (fixed capacity), SlicePool (reusable slices)
+  - StringInterner for string deduplication
+  - Parser utilities for SMTP commands, headers, emails, MIME (zero alloc)
+  - Transform utilities for in-place lowercase, CRLF strip, header unfold
+  - IoVec for scatter-gather I/O
 
 ### Phase 5: Input Validation & Error Handling ✅ COMPLETED (2025-10-24)
 - [x] **MIME Depth Validation**: Add max nesting depth (10 levels) to MIME parser ✅ (`src/message/mime.zig` - MAX_MIME_DEPTH=10)
@@ -1413,12 +1458,16 @@
   - LoadTestConfig with configurable concurrent connections
   - Metrics with percentile calculation (p50, p95, p99)
   - JSON output for CI/CD integration
-- [ ] **Coverage Measurement**: Add coverage tracking and enforce minimum thresholds
+- [x] **Coverage Measurement**: Add coverage tracking and enforce minimum thresholds ✅ (`src/tools/coverage.zig`)
+  - CoverageCollector, ReportGenerator (text/JSON/HTML/LCOV/Cobertura)
+  - Configurable thresholds with CI/CD enforcement
 - [x] **Chaos Engineering**: Add fault injection tests for resilience ✅ (`tests/chaos_test.zig`)
   - FaultInjector with 16 fault types and probability-based injection
   - 8 chaos scenarios (network partition, memory, database, latency, etc.)
   - ChaosRunner with recovery measurement and report generation
-- [ ] **Regression Test Index**: Document past vulnerabilities with test references
+- [x] **Regression Test Index**: Document past vulnerabilities with test references ✅ (`docs/REGRESSION_TESTS.md`)
+  - 21 documented regressions across 8 categories
+  - Security, protocol, auth, memory, concurrency, validation, resources
 
 ### Phase 8: Configuration & Deployment
 - [x] **Configuration Validation**: Add startup validation for all config values ✅ (`src/core/config.zig` - validate() method, called at startup)
@@ -1447,7 +1496,14 @@
 - [ ] **Kubernetes Tuning**: Add resource limits and network policy documentation
 
 ### Phase 9: Code Quality & Consistency
-- [ ] **Centralized Error Handling**: Create error handler utility to reduce duplication
+- [x] **Centralized Error Handling**: Create error handler utility to reduce duplication ✅ (`src/core/error_handler.zig`)
+  - ErrorHandler with category, severity, source tracking
+  - ErrorContext builder with fluent API for operation/component/session/client
+  - ErrorMetrics with atomic counters by category and severity
+  - ErrorBuilder for concise error emission
+  - Result(T) type with error context propagation
+  - Retry helper with exponential backoff
+  - Convenience functions: networkError, authError, securityError
 - [ ] **Standardize Memory Management**: Enforce consistent RAII with defer pattern
 - [x] **Buffer Size Constants**: Define constants for all magic buffer sizes ✅ (`src/core/constants.zig` - comprehensive constants module)
 - [ ] **Enforce Logger Usage**: Replace all `std.debug.print()` with logger interface
@@ -1579,7 +1635,8 @@
   - [x] Retention policy and pruning
   - [x] Automated backup scheduling
   - [x] Comprehensive test coverage
-- [ ] Migration tools from other servers
+- [x] Migration tools from other servers ✅ (`src/tools/server_migration.zig`)
+  - Postfix, Sendmail, Dovecot, Exim, Qmail, Courier, Maildir, mbox
 - [x] Plugin system for extensibility ✅ (`src/core/plugin.zig`)
   - Dynamic loading, 19 hook types, PluginManager
 - [x] GraphQL API - completed in v0.29.0
@@ -1590,9 +1647,12 @@
 - [x] IMAP server integration ✅ (`src/protocol/imap.zig`)
   - RFC 3501 IMAP4rev1 with 24 commands
   - Mailbox management, flags, IDLE support
-- [ ] POP3 server support
-- [ ] CalDAV/CardDAV support
-- [ ] ActiveSync support
+- [x] POP3 server support ✅ (`src/protocol/pop3.zig`)
+  - RFC 1939 POP3 with 11 commands, SSL/TLS support
+- [x] CalDAV/CardDAV support ✅ (`src/protocol/caldav.zig`)
+  - RFC 4791 CalDAV and RFC 6352 CardDAV with WebDAV
+- [x] ActiveSync support ✅ (`src/protocol/activesync.zig`)
+  - MS-ASHTTP/MS-ASCMD with 23 commands, v2.5-v16.1
 - [ ] Webmail client
 - [ ] Mobile app for administration
 
