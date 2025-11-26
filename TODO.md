@@ -1830,8 +1830,8 @@ All research topics have been thoroughly investigated and documented in **docs/R
 
 ## Project Information
 
-**Last Updated**: 2025-11-25
-**Current Version**: v0.29.0
+**Last Updated**: 2025-11-26
+**Current Version**: v0.28.0
 **Zig Version**: 0.15.1
 **License**: MIT
 

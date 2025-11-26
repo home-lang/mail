@@ -1,5 +1,6 @@
 const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
+const version_info = @import("../core/version.zig");
 
 /// Server statistics with thread-safe atomic counters
 pub const ServerStats = struct {
@@ -177,6 +178,8 @@ pub const HealthCheck = struct {
 
         try buf.appendSlice("{\"status\":\"");
         try buf.appendSlice(self.status.toString());
+        try buf.appendSlice("\",\"version\":\"");
+        try buf.appendSlice(version_info.version);
         try buf.appendSlice("\",\"uptime_seconds\":");
         try std.fmt.format(buf.writer(), "{d}", .{self.uptime_seconds});
         try buf.appendSlice(",\"active_connections\":");
@@ -709,4 +712,214 @@ test "health check to JSON" {
 
     try testing.expect(std.mem.indexOf(u8, json, "\"status\":\"healthy\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"uptime_seconds\":100") != null);
+}
+
+// =============================================================================
+// Cluster-Aware Health Checks
+// =============================================================================
+
+const cluster = @import("../infrastructure/cluster.zig");
+
+/// Cluster health status
+pub const ClusterHealthStatus = struct {
+    cluster_enabled: bool,
+    node_id: ?[]const u8,
+    node_role: ?[]const u8,
+    node_status: ?[]const u8,
+    total_nodes: u32,
+    healthy_nodes: u32,
+    leader_id: ?[]const u8,
+    raft_enabled: bool,
+    raft_term: u64,
+    raft_state: []const u8,
+
+    pub fn toJson(self: *const ClusterHealthStatus, allocator: std.mem.Allocator) ![]u8 {
+        var buf = std.ArrayList(u8).init(allocator);
+        const writer = buf.writer();
+
+        try writer.writeAll("{\"cluster_enabled\":");
+        try writer.writeAll(if (self.cluster_enabled) "true" else "false");
+
+        if (self.cluster_enabled) {
+            if (self.node_id) |id| {
+                try writer.print(",\"node_id\":\"{s}\"", .{id});
+            }
+            if (self.node_role) |role| {
+                try writer.print(",\"node_role\":\"{s}\"", .{role});
+            }
+            if (self.node_status) |status| {
+                try writer.print(",\"node_status\":\"{s}\"", .{status});
+            }
+            try writer.print(",\"total_nodes\":{d}", .{self.total_nodes});
+            try writer.print(",\"healthy_nodes\":{d}", .{self.healthy_nodes});
+            if (self.leader_id) |leader| {
+                try writer.print(",\"leader_id\":\"{s}\"", .{leader});
+            }
+            try writer.print(",\"raft_enabled\":{s}", .{if (self.raft_enabled) "true" else "false"});
+            if (self.raft_enabled) {
+                try writer.print(",\"raft_term\":{d}", .{self.raft_term});
+                try writer.print(",\"raft_state\":\"{s}\"", .{self.raft_state});
+            }
+        }
+
+        try writer.writeAll("}");
+        return buf.toOwnedSlice();
+    }
+};
+
+/// Cluster health checker
+pub const ClusterHealthChecker = struct {
+    allocator: std.mem.Allocator,
+    cluster_manager: ?*cluster.ClusterManager,
+
+    pub fn init(allocator: std.mem.Allocator, cluster_manager: ?*cluster.ClusterManager) ClusterHealthChecker {
+        return .{
+            .allocator = allocator,
+            .cluster_manager = cluster_manager,
+        };
+    }
+
+    /// Get cluster health status
+    pub fn getClusterHealth(self: *ClusterHealthChecker) ClusterHealthStatus {
+        if (self.cluster_manager) |cm| {
+            const stats = cm.getStats();
+            return .{
+                .cluster_enabled = true,
+                .node_id = cm.local_node.id,
+                .node_role = cm.local_node.getRole().toString(),
+                .node_status = cm.local_node.getStatus().toString(),
+                .total_nodes = stats.total_nodes,
+                .healthy_nodes = stats.healthy_nodes,
+                .leader_id = stats.leader_node_id,
+                .raft_enabled = stats.raft_enabled,
+                .raft_term = stats.raft_term,
+                .raft_state = stats.raft_state,
+            };
+        }
+
+        return .{
+            .cluster_enabled = false,
+            .node_id = null,
+            .node_role = null,
+            .node_status = null,
+            .total_nodes = 1,
+            .healthy_nodes = 1,
+            .leader_id = null,
+            .raft_enabled = false,
+            .raft_term = 0,
+            .raft_state = "standalone",
+        };
+    }
+
+    /// Check if cluster is healthy
+    pub fn isClusterHealthy(self: *ClusterHealthChecker) bool {
+        if (self.cluster_manager) |cm| {
+            const stats = cm.getStats();
+            // Cluster is healthy if we have a leader and majority of nodes are healthy
+            const has_leader = stats.leader_node_id != null;
+            const majority_healthy = stats.healthy_nodes > stats.total_nodes / 2;
+            return has_leader and majority_healthy;
+        }
+        return true; // Standalone mode is always "healthy"
+    }
+
+    /// Check if this node is the leader
+    pub fn isLeader(self: *ClusterHealthChecker) bool {
+        if (self.cluster_manager) |cm| {
+            return cm.isRaftLeader();
+        }
+        return true; // Standalone mode is always "leader"
+    }
+};
+
+/// Extended health check with cluster awareness
+pub const ClusterAwareHealthCheck = struct {
+    base: HealthCheck,
+    cluster_health: ClusterHealthStatus,
+
+    pub fn init(allocator: std.mem.Allocator) ClusterAwareHealthCheck {
+        return .{
+            .base = HealthCheck.init(allocator),
+            .cluster_health = .{
+                .cluster_enabled = false,
+                .node_id = null,
+                .node_role = null,
+                .node_status = null,
+                .total_nodes = 1,
+                .healthy_nodes = 1,
+                .leader_id = null,
+                .raft_enabled = false,
+                .raft_term = 0,
+                .raft_state = "standalone",
+            },
+        };
+    }
+
+    pub fn deinit(self: *ClusterAwareHealthCheck) void {
+        self.base.deinit();
+    }
+
+    pub fn toJson(self: *ClusterAwareHealthCheck) ![]u8 {
+        const base_json = try self.base.toJson();
+        defer self.base.allocator.free(base_json);
+
+        const cluster_json = try self.cluster_health.toJson(self.base.allocator);
+        defer self.base.allocator.free(cluster_json);
+
+        // Combine base health and cluster health
+        // Remove trailing } from base_json, add cluster section
+        if (base_json.len > 0 and base_json[base_json.len - 1] == '}') {
+            return try std.fmt.allocPrint(self.base.allocator, "{s},\"cluster\":{s}}}", .{
+                base_json[0 .. base_json.len - 1],
+                cluster_json,
+            });
+        }
+
+        return try self.base.allocator.dupe(u8, base_json);
+    }
+};
+
+/// Cluster-wide rate limiter integration
+pub const ClusterRateLimitHealth = struct {
+    allocator: std.mem.Allocator,
+    cluster_rate_limiter: ?*cluster.ClusterRateLimiter,
+
+    pub fn init(allocator: std.mem.Allocator, rate_limiter: ?*cluster.ClusterRateLimiter) ClusterRateLimitHealth {
+        return .{
+            .allocator = allocator,
+            .cluster_rate_limiter = rate_limiter,
+        };
+    }
+
+    /// Check rate limit across cluster
+    pub fn checkClusterRateLimit(self: *ClusterRateLimitHealth, key: []const u8, limit: u32) bool {
+        if (self.cluster_rate_limiter) |rl| {
+            return rl.checkAndIncrement(key, limit) catch false;
+        }
+        return true; // No cluster rate limiter, allow
+    }
+};
+
+test "cluster health status to JSON" {
+    const testing = std.testing;
+
+    const status = ClusterHealthStatus{
+        .cluster_enabled = true,
+        .node_id = "node-1",
+        .node_role = "leader",
+        .node_status = "healthy",
+        .total_nodes = 3,
+        .healthy_nodes = 3,
+        .leader_id = "node-1",
+        .raft_enabled = true,
+        .raft_term = 5,
+        .raft_state = "leader",
+    };
+
+    const json = try status.toJson(testing.allocator);
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"cluster_enabled\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"node_id\":\"node-1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"raft_term\":5") != null);
 }

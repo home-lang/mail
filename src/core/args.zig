@@ -1,5 +1,6 @@
 const std = @import("std");
 const logger = @import("logger.zig");
+const version_info = @import("version.zig");
 
 pub const Args = struct {
     config_file: ?[]const u8 = null,
@@ -155,6 +156,9 @@ pub fn printHelp() void {
 }
 
 pub fn printVersion() void {
-    std.debug.print("SMTP Server v0.1.0\n", .{});
-    std.debug.print("Built with Zig 0.15.1\n", .{});
+    const info = version_info.getBuildInfo();
+    std.debug.print("{s}\n", .{version_info.banner});
+    std.debug.print("Built with Zig {s}\n", .{info.zig_version});
+    std.debug.print("Build mode: {s}\n", .{info.build_mode});
+    std.debug.print("Target: {s}\n", .{info.target});
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
+const version_info = @import("../core/version.zig");
 
 /// Backup and Restore CLI Tool
 /// Provides comprehensive backup/restore functionality for the mail server
@@ -369,7 +370,7 @@ pub const BackupManager = struct {
         try writer.print("  \"version\": \"{s}\",\n", .{BACKUP_VERSION});
         try writer.print("  \"created_at\": {d},\n", .{timestamp});
         try writer.print("  \"backup_type\": \"{s}\",\n", .{backup_type.toString()});
-        try writer.print("  \"server_version\": \"0.29.0\",\n", .{});
+        try writer.print("  \"server_version\": \"{s}\",\n", .{version_info.version});
         try writer.print("  \"total_size\": {d},\n", .{total_size});
         try writer.print("  \"file_count\": {d},\n", .{files.items.len});
         try writer.print("  \"files\": [\n", .{});
@@ -452,7 +453,7 @@ pub const BackupManager = struct {
             .version = try self.allocator.dupe(u8, BACKUP_VERSION),
             .created_at = 0,
             .backup_type = .full,
-            .server_version = try self.allocator.dupe(u8, "0.29.0"),
+            .server_version = try self.allocator.dupe(u8, version_info.version),
             .hostname = try self.allocator.dupe(u8, "localhost"),
             .checksum = try self.allocator.dupe(u8, ""),
             .files = std.ArrayList(BackupManifest.FileEntry).init(self.allocator),

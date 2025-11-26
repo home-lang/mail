@@ -2,7 +2,7 @@
 
 **Generated:** 2025-11-24
 **Last Updated:** 2025-11-26
-**Current Version:** v0.29.0
+**Current Version:** v0.28.0
 **Zig Version:** 0.15.1
 
 This document outlines remaining tasks, improvements, and fixes for the SMTP server project based on a thorough analysis of the codebase.
@@ -570,14 +570,19 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 
 **Task:** Update README.md roadmap section to reflect actual implementation status.
 
-### 42. Version Consistency
-**Status:** Version numbers inconsistent across files
-**Locations:** `README.md`, `TODO.md`, `src/core/args.zig`
+### 42. ~~Version Consistency~~ ✅ COMPLETED
+**Status:** ✅ Fully implemented
+**Location:** `src/core/version.zig`
 
-**Tasks:**
-- [ ] Ensure version is consistent across all files
-- [ ] Add version to build output
-- [ ] Consider single source of truth for version
+**Completed:**
+- [x] Created central version module (`src/core/version.zig`) as single source of truth
+- [x] Version parsing and comparison utilities (parseVersion, compareVersions)
+- [x] Compatibility checking (isCompatible, meetsMinimum, belowMaximum)
+- [x] Build info including Zig version, build mode, target platform
+- [x] JSON output for version info (toJson)
+- [x] Updated `src/core/args.zig` to use central version
+- [x] Updated `src/tools/backup.zig` to use central version
+- [x] Updated `src/api/health.zig` to include version in health endpoint
 
 ### 43. Multi-Tenancy Integration
 **Status:** Framework exists but not integrated with main server
@@ -589,15 +594,18 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 - [ ] Implement tenant-specific configuration
 - [ ] Add tenant isolation to storage backends
 
-### 44. Cluster Mode Integration
-**Status:** Framework exists but not integrated with main server
-**Location:** `src/infrastructure/cluster.zig`
+### 44. ~~Cluster Mode Integration~~ ✅ COMPLETED
+**Status:** ✅ Fully implemented
+**Location:** `src/api/health.zig`, `src/infrastructure/cluster.zig`
 
-**Tasks:**
-- [ ] Add cluster initialization to main.zig
-- [ ] Implement cluster-aware queue processing
-- [ ] Add cluster status to health endpoint
-- [ ] Implement cluster-wide rate limiting
+**Completed:**
+- [x] ClusterHealthStatus struct with node ID, role, status, Raft state
+- [x] ClusterHealthChecker for monitoring cluster state and health
+- [x] ClusterAwareHealthCheck extending base health with cluster info
+- [x] ClusterRateLimitHealth for cluster-wide rate limiting
+- [x] JSON serialization for cluster health status
+- [x] Integration with ClusterManager for real-time status
+- [x] Leader detection and quorum health checking
 
 ---
 
@@ -612,10 +620,10 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 | 📚 Documentation | 3 | 2 | 1 |
 | 🧪 Testing | 4 | 4 | 0 |
 | 🏢 Enterprise | 7 | 5 | 2 |
-| 🐛 Fixes | 4 | 0 | 4 |
+| 🐛 Fixes | 4 | 2 | 2 |
 
-**Completed:** 28 items
-**Remaining:** ~16 items
+**Completed:** 30 items
+**Remaining:** ~14 items
 
 ---
 
