@@ -563,6 +563,386 @@ pub const MetricGauges = struct {
     connections_active: usize = 0,
     queue_size: usize = 0,
     memory_used: usize = 0,
+    queue_pending: usize = 0,
+    queue_deferred: usize = 0,
+    queue_active: usize = 0,
+};
+
+// =============================================================================
+// Enhanced Metrics: Bounce Rate by Domain, Queue Histograms, Message Size
+// =============================================================================
+
+/// Domain-specific bounce tracking
+pub const DomainBounceTracker = struct {
+    const Self = @This();
+    const DomainStats = struct {
+        total_sent: u64 = 0,
+        hard_bounces: u64 = 0,
+        soft_bounces: u64 = 0,
+        blocks: u64 = 0,
+
+        pub fn bounceRate(self: DomainStats) f64 {
+            if (self.total_sent == 0) return 0.0;
+            const total_bounces = self.hard_bounces + self.soft_bounces + self.blocks;
+            return @as(f64, @floatFromInt(total_bounces)) / @as(f64, @floatFromInt(self.total_sent)) * 100.0;
+        }
+    };
+
+    allocator: std.mem.Allocator,
+    domains: std.StringHashMap(DomainStats),
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return .{
+            .allocator = allocator,
+            .domains = std.StringHashMap(DomainStats).init(allocator),
+            .mutex = .{},
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        var iter = self.domains.keyIterator();
+        while (iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.domains.deinit();
+    }
+
+    pub fn recordSent(self: *Self, domain: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.domains.getPtr(domain)) |stats| {
+            stats.total_sent += 1;
+        } else {
+            const owned_domain = self.allocator.dupe(u8, domain) catch return;
+            self.domains.put(owned_domain, DomainStats{ .total_sent = 1 }) catch {
+                self.allocator.free(owned_domain);
+            };
+        }
+    }
+
+    pub fn recordBounce(self: *Self, domain: []const u8, bounce_type: BounceType) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.domains.getPtr(domain)) |stats| {
+            switch (bounce_type) {
+                .hard => stats.hard_bounces += 1,
+                .soft => stats.soft_bounces += 1,
+                .block => stats.blocks += 1,
+                else => {},
+            }
+        } else {
+            var new_stats = DomainStats{};
+            switch (bounce_type) {
+                .hard => new_stats.hard_bounces = 1,
+                .soft => new_stats.soft_bounces = 1,
+                .block => new_stats.blocks = 1,
+                else => {},
+            }
+            const owned_domain = self.allocator.dupe(u8, domain) catch return;
+            self.domains.put(owned_domain, new_stats) catch {
+                self.allocator.free(owned_domain);
+            };
+        }
+    }
+
+    pub fn getBounceRate(self: *Self, domain: []const u8) f64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.domains.get(domain)) |stats| {
+            return stats.bounceRate();
+        }
+        return 0.0;
+    }
+
+    pub fn getHighBounceRateDomains(self: *Self, threshold: f64) ![]const DomainBounceReport {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var reports = std.ArrayList(DomainBounceReport).init(self.allocator);
+        errdefer reports.deinit();
+
+        var iter = self.domains.iterator();
+        while (iter.next()) |entry| {
+            const stats = entry.value_ptr.*;
+            const rate = stats.bounceRate();
+            if (rate >= threshold) {
+                try reports.append(.{
+                    .domain = entry.key_ptr.*,
+                    .bounce_rate = rate,
+                    .total_sent = stats.total_sent,
+                    .hard_bounces = stats.hard_bounces,
+                    .soft_bounces = stats.soft_bounces,
+                });
+            }
+        }
+
+        return reports.toOwnedSlice();
+    }
+};
+
+pub const DomainBounceReport = struct {
+    domain: []const u8,
+    bounce_rate: f64,
+    total_sent: u64,
+    hard_bounces: u64,
+    soft_bounces: u64,
+};
+
+/// Queue depth histogram with configurable buckets
+pub const QueueDepthHistogram = struct {
+    const Self = @This();
+
+    // Bucket boundaries: 0, 10, 50, 100, 500, 1000, 5000, 10000, 50000, inf
+    buckets: [10]u64 = [_]u64{0} ** 10,
+    bucket_boundaries: [9]usize = .{ 10, 50, 100, 500, 1000, 5000, 10000, 50000, 100000 },
+    samples: u64 = 0,
+    sum: u64 = 0,
+    min: ?usize = null,
+    max: ?usize = null,
+    mutex: std.Thread.Mutex = .{},
+
+    pub fn record(self: *Self, depth: usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.samples += 1;
+        self.sum += depth;
+
+        if (self.min == null or depth < self.min.?) {
+            self.min = depth;
+        }
+        if (self.max == null or depth > self.max.?) {
+            self.max = depth;
+        }
+
+        // Find bucket
+        var bucket_idx: usize = self.bucket_boundaries.len;
+        for (self.bucket_boundaries, 0..) |boundary, i| {
+            if (depth < boundary) {
+                bucket_idx = i;
+                break;
+            }
+        }
+        self.buckets[bucket_idx] += 1;
+    }
+
+    pub fn getPercentile(self: *Self, p: f64) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.samples == 0) return 0;
+
+        const target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(self.samples)) * p / 100.0));
+        var cumulative: u64 = 0;
+
+        for (self.buckets, 0..) |count, i| {
+            cumulative += count;
+            if (cumulative >= target) {
+                if (i < self.bucket_boundaries.len) {
+                    return self.bucket_boundaries[i];
+                }
+                return self.max orelse 0;
+            }
+        }
+        return self.max orelse 0;
+    }
+
+    pub fn average(self: *Self) f64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.samples == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.sum)) / @as(f64, @floatFromInt(self.samples));
+    }
+
+    pub fn reset(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.buckets = [_]u64{0} ** 10;
+        self.samples = 0;
+        self.sum = 0;
+        self.min = null;
+        self.max = null;
+    }
+};
+
+/// Message size distribution tracking
+pub const MessageSizeDistribution = struct {
+    const Self = @This();
+
+    // Size buckets: 0-1KB, 1-10KB, 10-100KB, 100KB-1MB, 1-10MB, 10-50MB, 50MB+
+    bucket_boundaries: [6]usize = .{ 1024, 10240, 102400, 1048576, 10485760, 52428800 },
+    buckets: [7]u64 = [_]u64{0} ** 7,
+    total_bytes: u64 = 0,
+    total_messages: u64 = 0,
+    min_size: ?usize = null,
+    max_size: ?usize = null,
+    mutex: std.Thread.Mutex = .{},
+
+    pub fn record(self: *Self, size: usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.total_messages += 1;
+        self.total_bytes += size;
+
+        if (self.min_size == null or size < self.min_size.?) {
+            self.min_size = size;
+        }
+        if (self.max_size == null or size > self.max_size.?) {
+            self.max_size = size;
+        }
+
+        // Find bucket
+        var bucket_idx: usize = self.bucket_boundaries.len;
+        for (self.bucket_boundaries, 0..) |boundary, i| {
+            if (size < boundary) {
+                bucket_idx = i;
+                break;
+            }
+        }
+        self.buckets[bucket_idx] += 1;
+    }
+
+    pub fn averageSize(self: *Self) f64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.total_messages == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.total_bytes)) / @as(f64, @floatFromInt(self.total_messages));
+    }
+
+    pub fn getDistribution(self: *Self) SizeDistributionReport {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        return .{
+            .total_messages = self.total_messages,
+            .total_bytes = self.total_bytes,
+            .average_size = if (self.total_messages > 0)
+                @as(f64, @floatFromInt(self.total_bytes)) / @as(f64, @floatFromInt(self.total_messages))
+            else
+                0.0,
+            .min_size = self.min_size orelse 0,
+            .max_size = self.max_size orelse 0,
+            .under_1kb = self.buckets[0],
+            .kb_1_to_10 = self.buckets[1],
+            .kb_10_to_100 = self.buckets[2],
+            .kb_100_to_1mb = self.buckets[3],
+            .mb_1_to_10 = self.buckets[4],
+            .mb_10_to_50 = self.buckets[5],
+            .over_50mb = self.buckets[6],
+        };
+    }
+
+    pub fn reset(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.buckets = [_]u64{0} ** 7;
+        self.total_bytes = 0;
+        self.total_messages = 0;
+        self.min_size = null;
+        self.max_size = null;
+    }
+};
+
+pub const SizeDistributionReport = struct {
+    total_messages: u64,
+    total_bytes: u64,
+    average_size: f64,
+    min_size: usize,
+    max_size: usize,
+    under_1kb: u64,
+    kb_1_to_10: u64,
+    kb_10_to_100: u64,
+    kb_100_to_1mb: u64,
+    mb_1_to_10: u64,
+    mb_10_to_50: u64,
+    over_50mb: u64,
+};
+
+/// Extended metrics aggregator combining all enhanced metrics
+pub const ExtendedMetrics = struct {
+    const Self = @This();
+
+    allocator: std.mem.Allocator,
+    base_metrics: SmtpMetrics,
+    domain_bounces: DomainBounceTracker,
+    queue_histogram: QueueDepthHistogram,
+    size_distribution: MessageSizeDistribution,
+
+    // Per-protocol metrics
+    imap_connections: u64 = 0,
+    pop3_connections: u64 = 0,
+    websocket_connections: u64 = 0,
+
+    pub fn init(allocator: std.mem.Allocator, statsd_host: ?[]const u8, statsd_port: u16, prefix: []const u8) !Self {
+        return .{
+            .allocator = allocator,
+            .base_metrics = try SmtpMetrics.init(allocator, statsd_host, statsd_port, prefix),
+            .domain_bounces = DomainBounceTracker.init(allocator),
+            .queue_histogram = .{},
+            .size_distribution = .{},
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.base_metrics.deinit();
+        self.domain_bounces.deinit();
+    }
+
+    // Delegate to base metrics
+    pub fn recordMessageReceived(self: *Self, domain: []const u8, size_bytes: usize) void {
+        self.base_metrics.recordMessageReceived(domain, size_bytes);
+        self.size_distribution.record(size_bytes);
+    }
+
+    pub fn recordMessageSent(self: *Self, domain: []const u8, size_bytes: usize, delivery_time_ms: u64) void {
+        self.base_metrics.recordMessageSent(domain, size_bytes, delivery_time_ms);
+        self.domain_bounces.recordSent(domain);
+    }
+
+    pub fn recordBounceWithDomain(self: *Self, bounce_type: BounceType, domain: []const u8) void {
+        self.base_metrics.recordBounce(bounce_type, domain);
+        self.domain_bounces.recordBounce(domain, bounce_type);
+    }
+
+    pub fn recordQueueDepth(self: *Self, depth: usize) void {
+        self.queue_histogram.record(depth);
+        self.base_metrics.updateQueueSize("main", depth);
+    }
+
+    pub fn getExtendedSnapshot(self: *Self) ExtendedMetricsSnapshot {
+        return .{
+            .base = self.base_metrics.getSnapshot(),
+            .size_distribution = self.size_distribution.getDistribution(),
+            .queue_p50 = self.queue_histogram.getPercentile(50),
+            .queue_p95 = self.queue_histogram.getPercentile(95),
+            .queue_p99 = self.queue_histogram.getPercentile(99),
+            .queue_avg = self.queue_histogram.average(),
+            .imap_connections = self.imap_connections,
+            .pop3_connections = self.pop3_connections,
+            .websocket_connections = self.websocket_connections,
+        };
+    }
+};
+
+pub const ExtendedMetricsSnapshot = struct {
+    base: MetricsSnapshot,
+    size_distribution: SizeDistributionReport,
+    queue_p50: usize,
+    queue_p95: usize,
+    queue_p99: usize,
+    queue_avg: f64,
+    imap_connections: u64,
+    pop3_connections: u64,
+    websocket_connections: u64,
 };
 
 /// Histogram data for timing metrics

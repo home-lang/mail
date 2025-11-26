@@ -86,6 +86,12 @@ pub const caldav = @import("protocol/caldav.zig");
 /// ActiveSync protocol (MS-ASHTTP)
 pub const activesync = @import("protocol/activesync.zig");
 
+/// ActiveSync sync engine
+pub const activesync_sync = @import("protocol/activesync_sync.zig");
+
+/// Protocol integration and unified server
+pub const protocol_integration = @import("protocol/integration.zig");
+
 // =============================================================================
 // Authentication Modules
 // =============================================================================
@@ -125,6 +131,9 @@ pub const dkim = @import("validation/dkim.zig");
 /// DMARC validation (RFC 7489)
 pub const dmarc = @import("validation/dmarc.zig");
 
+/// Machine Learning spam detection
+pub const ml_spam = @import("validation/ml_spam.zig");
+
 // =============================================================================
 // Storage Modules
 // =============================================================================
@@ -137,6 +146,9 @@ pub const maildir = @import("storage/maildir.zig");
 
 /// Backup and restore utilities
 pub const backup = @import("storage/backup.zig");
+
+/// CalDAV/CardDAV storage
+pub const caldav_store = @import("storage/caldav_store.zig");
 
 // =============================================================================
 // Queue Modules
@@ -212,6 +224,37 @@ pub const coverage = @import("tools/coverage.zig");
 
 /// Server migration tools
 pub const server_migration = @import("tools/server_migration.zig");
+
+// =============================================================================
+// Features Modules
+// =============================================================================
+
+/// Multi-tenancy support
+pub const multitenancy = @import("features/multitenancy.zig");
+
+/// Tenant integration for connections
+pub const tenant_integration = @import("features/tenant_integration.zig");
+
+/// Email archiving and compliance
+pub const email_archiving = @import("features/email_archiving.zig");
+
+/// Quota management
+pub const quota = @import("features/quota.zig");
+
+/// Audit logging
+pub const audit = @import("features/audit.zig");
+
+/// GDPR compliance
+pub const gdpr = @import("features/gdpr.zig");
+
+/// Autoresponder
+pub const autoresponder = @import("features/autoresponder.zig");
+
+/// Mailing list support
+pub const mailinglist = @import("features/mailinglist.zig");
+
+/// Webhook notifications
+pub const webhook = @import("features/webhook.zig");
 
 // =============================================================================
 // Common Type Aliases

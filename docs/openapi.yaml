@@ -49,6 +49,10 @@ tags:
     description: Server statistics
   - name: GraphQL
     description: GraphQL API endpoint
+  - name: Tenants
+    description: Multi-tenancy management
+  - name: Archive
+    description: Email archiving and compliance
 
 paths:
   /api/csrf-token:
@@ -849,6 +853,548 @@ paths:
               schema:
                 type: string
 
+  # Multi-tenancy Endpoints
+  /api/tenants:
+    get:
+      tags:
+        - Tenants
+      summary: List all tenants
+      description: Returns a list of all configured tenants with their settings.
+      operationId: listTenants
+      responses:
+        '200':
+          description: Tenant list retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantListResponse'
+
+    post:
+      tags:
+        - Tenants
+      summary: Create a new tenant
+      description: Creates a new tenant with the specified configuration.
+      operationId: createTenant
+      security:
+        - csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+      responses:
+        '201':
+          description: Tenant created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          description: Invalid tenant configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Tenant already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/tenants/{tenantId}:
+    get:
+      tags:
+        - Tenants
+      summary: Get tenant details
+      description: Returns detailed information for a specific tenant.
+      operationId: getTenant
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags:
+        - Tenants
+      summary: Update tenant
+      description: Updates tenant configuration.
+      operationId: updateTenant
+      security:
+        - csrfToken: []
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenantRequest'
+      responses:
+        '200':
+          description: Tenant updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - Tenants
+      summary: Delete tenant
+      description: Deletes a tenant and optionally all associated data.
+      operationId: deleteTenant
+      security:
+        - csrfToken: []
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: deleteData
+          in: query
+          description: Also delete all tenant data
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Tenant deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/tenants/{tenantId}/stats:
+    get:
+      tags:
+        - Tenants
+      summary: Get tenant statistics
+      description: Returns usage statistics for a specific tenant.
+      operationId: getTenantStats
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant statistics retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantStats'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Email Archiving Endpoints
+  /api/archive/search:
+    get:
+      tags:
+        - Archive
+      summary: Search archived messages
+      description: Performs search across archived emails with filtering options.
+      operationId: searchArchive
+      parameters:
+        - name: q
+          in: query
+          description: Full-text search query
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          description: Filter by tenant
+          schema:
+            type: integer
+        - name: user_email
+          in: query
+          description: Filter by user email
+          schema:
+            type: string
+        - name: sender
+          in: query
+          description: Filter by sender
+          schema:
+            type: string
+        - name: from_date
+          in: query
+          description: Filter messages after this Unix timestamp
+          schema:
+            type: integer
+            format: int64
+        - name: to_date
+          in: query
+          description: Filter messages before this Unix timestamp
+          schema:
+            type: integer
+            format: int64
+        - name: legal_hold_only
+          in: query
+          description: Only return messages under legal hold
+          schema:
+            type: boolean
+        - name: limit
+          in: query
+          description: Maximum results (default 100, max 1000)
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          description: Pagination offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Archive search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArchiveSearchResponse'
+
+  /api/archive/stats:
+    get:
+      tags:
+        - Archive
+      summary: Get archive statistics
+      description: Returns overall archive statistics.
+      operationId: getArchiveStats
+      responses:
+        '200':
+          description: Archive statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArchiveStats'
+
+  /api/archive/retention-policies:
+    get:
+      tags:
+        - Archive
+      summary: List retention policies
+      description: Returns all configured retention policies.
+      operationId: listRetentionPolicies
+      responses:
+        '200':
+          description: Retention policies list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicyListResponse'
+
+    post:
+      tags:
+        - Archive
+      summary: Create retention policy
+      description: Creates a new email retention policy.
+      operationId: createRetentionPolicy
+      security:
+        - csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRetentionPolicyRequest'
+      responses:
+        '201':
+          description: Policy created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicy'
+        '400':
+          description: Invalid policy configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/archive/retention-policies/{policyId}:
+    delete:
+      tags:
+        - Archive
+      summary: Delete retention policy
+      description: Deletes a retention policy.
+      operationId: deleteRetentionPolicy
+      security:
+        - csrfToken: []
+      parameters:
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Policy deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Policy not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/archive/legal-holds:
+    get:
+      tags:
+        - Archive
+      summary: List legal holds
+      description: Returns all legal holds (active and released).
+      operationId: listLegalHolds
+      parameters:
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+            enum: [active, released, expired, pending]
+      responses:
+        '200':
+          description: Legal holds list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalHoldListResponse'
+
+    post:
+      tags:
+        - Archive
+      summary: Create legal hold
+      description: Creates a new legal hold to preserve emails for compliance.
+      operationId: createLegalHold
+      security:
+        - csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLegalHoldRequest'
+      responses:
+        '201':
+          description: Legal hold created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalHold'
+        '400':
+          description: Invalid hold configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/archive/legal-holds/{holdId}:
+    get:
+      tags:
+        - Archive
+      summary: Get legal hold details
+      description: Returns detailed information about a legal hold.
+      operationId: getLegalHold
+      parameters:
+        - name: holdId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Legal hold details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalHold'
+        '404':
+          description: Legal hold not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - Archive
+      summary: Release legal hold
+      description: Releases a legal hold, allowing normal retention policies to apply.
+      operationId: releaseLegalHold
+      security:
+        - csrfToken: []
+      parameters:
+        - name: holdId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Legal hold released
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Legal hold not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/archive/export:
+    post:
+      tags:
+        - Archive
+      summary: Create export job
+      description: Creates a new archive export job for downloading emails.
+      operationId: createExportJob
+      security:
+        - csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExportJobRequest'
+      responses:
+        '201':
+          description: Export job created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJob'
+        '400':
+          description: Invalid export configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/archive/export/{jobId}:
+    get:
+      tags:
+        - Archive
+      summary: Get export job status
+      description: Returns the status of an export job.
+      operationId: getExportJobStatus
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Export job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJob'
+        '404':
+          description: Export job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - Archive
+      summary: Cancel export job
+      description: Cancels a running or pending export job.
+      operationId: cancelExportJob
+      security:
+        - csrfToken: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Export job cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Export job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/archive/export/{jobId}/download:
+    get:
+      tags:
+        - Archive
+      summary: Download export file
+      description: Downloads the completed export file.
+      operationId: downloadExport
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Export file download
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Export not found or not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   securitySchemes:
     csrfToken:
@@ -1206,3 +1752,381 @@ components:
                   type: string
                 writable:
                   type: boolean
+
+    # Multi-tenancy Schemas
+    Tenant:
+      type: object
+      required: [id, name, domain, enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        domain:
+          type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: integer
+          format: int64
+        settings:
+          $ref: '#/components/schemas/TenantSettings'
+
+    TenantSettings:
+      type: object
+      properties:
+        max_users:
+          type: integer
+        max_storage_gb:
+          type: integer
+        max_message_size_mb:
+          type: integer
+        rate_limit_per_minute:
+          type: integer
+        features:
+          type: array
+          items:
+            type: string
+
+    TenantListResponse:
+      type: object
+      required: [tenants, count]
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tenant'
+        count:
+          type: integer
+
+    CreateTenantRequest:
+      type: object
+      required: [name, domain]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        domain:
+          type: string
+        settings:
+          $ref: '#/components/schemas/TenantSettings'
+
+    UpdateTenantRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        settings:
+          $ref: '#/components/schemas/TenantSettings'
+
+    TenantStats:
+      type: object
+      properties:
+        tenant_id:
+          type: integer
+          format: int64
+        user_count:
+          type: integer
+        storage_used_bytes:
+          type: integer
+          format: int64
+        message_count:
+          type: integer
+          format: int64
+        messages_today:
+          type: integer
+        active_connections:
+          type: integer
+
+    # Email Archiving Schemas
+    ArchivedMessage:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        message_id:
+          type: string
+        tenant_id:
+          type: integer
+          format: int64
+        user_email:
+          type: string
+        sender:
+          type: string
+        recipients:
+          type: string
+        subject:
+          type: string
+        received_at:
+          type: integer
+          format: int64
+        archived_at:
+          type: integer
+          format: int64
+        folder:
+          type: string
+        size:
+          type: integer
+          format: int64
+        has_attachments:
+          type: boolean
+        legal_hold:
+          type: boolean
+
+    ArchiveSearchResponse:
+      type: object
+      required: [messages, total_count, offset, limit]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArchivedMessage'
+        total_count:
+          type: integer
+          format: int64
+        offset:
+          type: integer
+        limit:
+          type: integer
+
+    ArchiveStats:
+      type: object
+      properties:
+        total_messages:
+          type: integer
+          format: int64
+        total_size:
+          type: integer
+          format: int64
+        compressed_size:
+          type: integer
+          format: int64
+        deduplicated_messages:
+          type: integer
+          format: int64
+        active_legal_holds:
+          type: integer
+        messages_under_hold:
+          type: integer
+          format: int64
+        pending_deletions:
+          type: integer
+          format: int64
+
+    RetentionPolicy:
+      type: object
+      required: [id, name, retention_days, expiry_action, enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        tenant_id:
+          type: integer
+          format: int64
+          nullable: true
+        retention_days:
+          type: integer
+        expiry_action:
+          type: string
+          enum: [delete, archive_only, move_to_cold_storage, notify_admin]
+        folders:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+        enabled:
+          type: boolean
+
+    RetentionPolicyListResponse:
+      type: object
+      required: [policies, count]
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/RetentionPolicy'
+        count:
+          type: integer
+
+    CreateRetentionPolicyRequest:
+      type: object
+      required: [name, retention_days, expiry_action]
+      properties:
+        name:
+          type: string
+        tenant_id:
+          type: integer
+          format: int64
+        retention_days:
+          type: integer
+          minimum: 0
+        expiry_action:
+          type: string
+          enum: [delete, archive_only, move_to_cold_storage, notify_admin]
+        folders:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          default: 0
+
+    LegalHold:
+      type: object
+      required: [id, matter_id, name, custodians, status, created_at, created_by]
+      properties:
+        id:
+          type: integer
+          format: int64
+        matter_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        custodians:
+          type: array
+          items:
+            type: string
+        start_date:
+          type: integer
+          format: int64
+          nullable: true
+        end_date:
+          type: integer
+          format: int64
+          nullable: true
+        search_query:
+          type: string
+        status:
+          type: string
+          enum: [active, released, expired, pending]
+        created_at:
+          type: integer
+          format: int64
+        created_by:
+          type: string
+        expires_at:
+          type: integer
+          format: int64
+          nullable: true
+        message_count:
+          type: integer
+          format: int64
+        total_size:
+          type: integer
+          format: int64
+
+    LegalHoldListResponse:
+      type: object
+      required: [holds, count]
+      properties:
+        holds:
+          type: array
+          items:
+            $ref: '#/components/schemas/LegalHold'
+        count:
+          type: integer
+
+    CreateLegalHoldRequest:
+      type: object
+      required: [matter_id, name, custodians]
+      properties:
+        matter_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        custodians:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        start_date:
+          type: integer
+          format: int64
+        end_date:
+          type: integer
+          format: int64
+        search_query:
+          type: string
+        expires_at:
+          type: integer
+          format: int64
+
+    ExportJob:
+      type: object
+      required: [id, status, format, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        format:
+          type: string
+          enum: [mbox, pst, eml, emlx, json]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        messages_processed:
+          type: integer
+          format: int64
+        total_messages:
+          type: integer
+          format: int64
+        output_size:
+          type: integer
+          format: int64
+        created_at:
+          type: integer
+          format: int64
+        started_at:
+          type: integer
+          format: int64
+          nullable: true
+        completed_at:
+          type: integer
+          format: int64
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+
+    CreateExportJobRequest:
+      type: object
+      required: [format]
+      properties:
+        format:
+          type: string
+          enum: [mbox, pst, eml, emlx, json]
+        query:
+          type: string
+        tenant_id:
+          type: integer
+          format: int64
+        user_email:
+          type: string
+        from_date:
+          type: integer
+          format: int64
+        to_date:
+          type: integer
+          format: int64
+        include_attachments:
+          type: boolean
+          default: true
+        compress:
+          type: boolean
+          default: true

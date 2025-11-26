@@ -134,6 +134,11 @@
   - PluginManager with load/unload/enable/disable
   - Plugin dependency resolution
   - PluginBuilder helper for creating plugins
+  - **Hot-Reload Support**: HotReloadManager with file watching, SHA256 checksums, debouncing
+  - **Plugin Manifest System**: TOML-based manifest with permissions and config schema
+  - **Plugin Event System**: PluginEventEmitter for inter-plugin communication
+  - **Example Plugin Templates**: SpamFilter, RateLimiter, Logging, AttachmentScanner, HeaderModifier
+  - **Plugin SDK**: PluginContext, PluginRegistration for external developers
 - ✅ **Chaos Engineering**: Fault injection testing (`tests/chaos_test.zig`)
   - FaultInjector with 16 fault types (network, resource, dependency, timing, data)
   - 8 predefined chaos scenarios (partition, memory, database, latency, etc.)
@@ -157,18 +162,24 @@
   - MaildirImporter with flag parsing
   - MboxImporter with message splitting
   - MigrationManager with statistics and error tracking
-- ✅ **CalDAV/CardDAV Support**: Calendar & contacts sync (`src/protocol/caldav.zig`)
+- ✅ **CalDAV/CardDAV Support**: Calendar & contacts sync (`src/protocol/caldav.zig`, `src/storage/caldav_store.zig`)
   - RFC 4791 CalDAV and RFC 6352 CardDAV
   - CalDavServer with session management and authentication
   - 12 HTTP methods (GET, PUT, PROPFIND, PROPPATCH, MKCALENDAR, REPORT, etc.)
   - iCalendar (VEVENT, VTODO) and vCard resource handling
   - Calendar/addressbook query reports
-- ✅ **ActiveSync Support**: Mobile device sync (`src/protocol/activesync.zig`)
+  - **CalDavStore**: Persistent storage with sync tokens (RFC 6578)
+  - **IcsParser/VcfParser**: iCalendar and vCard parsing
+  - Efficient delta sync with change tracking
+- ✅ **ActiveSync Support**: Mobile device sync (`src/protocol/activesync.zig`, `src/protocol/activesync_sync.zig`)
   - MS-ASHTTP and MS-ASCMD protocols (v2.5 to v16.1)
   - ActiveSyncServer with 23 commands (Sync, FolderSync, Ping, SendMail, etc.)
   - Folder types for inbox, calendar, contacts, tasks
   - Device provisioning and policy management
   - Push notification support via Ping
+  - **SyncEngine**: Email/Calendar/Contact sync with conflict resolution
+  - **Device Management**: Provisioning, remote wipe, policy enforcement
+  - **Meeting Response**: Accept/tentative/decline handling
 - ✅ **Regression Test Index**: Bug documentation (`docs/REGRESSION_TESTS.md`)
   - 21 documented regressions across 8 categories
   - Security vulnerabilities (SEC-001 to SEC-004)
@@ -1440,7 +1451,12 @@
   - CONNECTION, COMMAND, AUTHENTICATION spans
   - MESSAGE_RECEIVE, MESSAGE_DELIVER spans
   - DNS_LOOKUP, TLS_HANDSHAKE, SPAM_CHECK, DKIM_VERIFY, SPF_CHECK spans
-- [ ] **Application Metrics**: Track spam/virus stats, auth categorization, bounce rates
+- [x] **Application Metrics**: Track spam/virus stats, auth categorization, bounce rates ✅ (`src/observability/metrics.zig`)
+  - DomainBounceTracker for per-domain bounce rate tracking
+  - QueueDepthHistogram with percentiles (p50, p95, p99)
+  - MessageSizeDistribution with bucket breakdowns
+  - ExtendedMetrics aggregator combining all enhanced metrics
+  - Protocol-specific connection metrics (IMAP, POP3, WebSocket)
 - [x] **Alerting Integration**: Add webhooks for critical events (queue size, error rate) ✅ (`src/observability/alerting.zig`)
   - AlertManager with multiple backends: Slack, Discord, PagerDuty, OpsGenie, Email, Generic webhooks
   - Alert severity levels: info, warning, critical, emergency
@@ -1631,7 +1647,13 @@
 
 ## Future Ideas 💡
 
-- [ ] Machine learning spam detection
+- [x] Machine learning spam detection ✅ (`src/validation/ml_spam.zig`)
+  - NaiveBayesClassifier with multinomial model and Laplace smoothing
+  - FeatureExtractor for words, headers, URLs, HTML, statistical features
+  - TrainingPipeline with online learning from user feedback
+  - ModelVersionManager for versioning and rollback support
+  - SpamDetector with SpamAssassin score integration
+  - Stop words filtering and vocabulary management
 - [x] Encrypted email storage at rest
   - [x] AES-256-GCM authenticated encryption
   - [x] Per-message unique nonces
@@ -1643,7 +1665,14 @@
   - [x] Key rotation support
   - [x] Secure key management
   - [x] Comprehensive test coverage
-- [ ] Multi-tenancy support
+- [x] Multi-tenancy support ✅ (`src/features/multitenancy.zig`, `src/features/tenant_integration.zig`)
+  - Tenant struct with settings, quotas, and policies
+  - TenantManager with CRUD operations and caching
+  - TenantConnection for per-connection tenant context
+  - TenantResolver for domain/email tenant resolution
+  - TenantRateLimiter for per-tenant rate limiting
+  - TenantStorageIsolator for tenant data isolation
+  - OpenAPI endpoints for tenant management
 - [x] Cluster mode for high availability ✅ (`src/infrastructure/raft.zig`, `src/infrastructure/cluster.zig`)
   - Raft consensus implementation (822 lines)
   - Leader election with randomized timeouts
@@ -1656,7 +1685,16 @@
   - [x] REST API endpoints
   - [x] Advanced filtering and sorting
   - [x] Search statistics and index rebuilding
-- [ ] Email archiving
+- [x] Email archiving ✅ (`src/features/email_archiving.zig`)
+  - EmailArchiver with compression and deduplication
+  - RetentionPolicy with configurable expiry actions
+  - LegalHold for compliance with custodians and matter IDs
+  - ArchivedMessage with content hash for dedup
+  - ArchiveSearchQuery with full-text and filters
+  - ExportJob supporting MBOX, PST, EML, JSON formats
+  - JournalService for RFC 5765 compliance
+  - ArchiveCleanupService for retention enforcement
+  - OpenAPI endpoints for archive management
 - [x] Backup and restore utilities
   - [x] Full backup creation
   - [x] Incremental backup support
@@ -1688,6 +1726,14 @@
   - RFC 4791 CalDAV and RFC 6352 CardDAV with WebDAV
 - [x] ActiveSync support ✅ (`src/protocol/activesync.zig`)
   - MS-ASHTTP/MS-ASCMD with 23 commands, v2.5-v16.1
+- [x] Protocol Integration ✅ (`src/protocol/integration.zig`)
+  - ProtocolServer for unified SMTP/IMAP/POP3/WebSocket startup
+  - ConnectionRouter for port-based protocol routing
+  - ServerBuilder fluent API for configuration
+  - HealthStatus aggregation across all protocols
+  - ProtocolMetrics with per-protocol connection tracking
+  - WebSocketFrame parser for RFC 6455 frames
+  - ImapCommands and Pop3Commands parsers
 - [ ] Webmail client
 - [ ] Mobile app for administration
 
