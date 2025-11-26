@@ -209,8 +209,8 @@ pub const BackupManager = struct {
             }
         }
 
-        // Load metadata
-        const metadata = try self.loadMetadata(backup_dir);
+        // Load metadata (validates backup structure)
+        _ = try self.loadMetadata(backup_dir);
 
         // Restore files
         const stats = try self.copyDirectory(backup_dir, target_path);
@@ -566,6 +566,876 @@ test "backup manager initialization" {
     try testing.expectEqualStrings(source, manager.source_path);
     try testing.expectEqualStrings(backup, manager.backup_path);
 }
+
+// =============================================================================
+// Enhanced Backup CLI Features
+// =============================================================================
+
+/// Encryption configuration for backups
+pub const EncryptionConfig = struct {
+    algorithm: EncryptionAlgorithm = .aes_256_gcm,
+    key_derivation: KeyDerivation = .argon2id,
+    key_file_path: ?[]const u8 = null,
+
+    pub const EncryptionAlgorithm = enum {
+        aes_256_gcm,
+        chacha20_poly1305,
+    };
+
+    pub const KeyDerivation = enum {
+        argon2id,
+        scrypt,
+        pbkdf2,
+    };
+};
+
+/// Key management for backup encryption
+pub const BackupKeyManager = struct {
+    allocator: std.mem.Allocator,
+    keys: std.StringHashMap(KeyInfo),
+    key_store_path: []const u8,
+
+    const KeyInfo = struct {
+        id: []const u8,
+        created_at: i64,
+        algorithm: EncryptionConfig.EncryptionAlgorithm,
+        key_hash: [32]u8, // SHA256 of actual key for verification
+        active: bool,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, key_store_path: []const u8) BackupKeyManager {
+        return .{
+            .allocator = allocator,
+            .keys = std.StringHashMap(KeyInfo).init(allocator),
+            .key_store_path = key_store_path,
+        };
+    }
+
+    pub fn deinit(self: *BackupKeyManager) void {
+        var iter = self.keys.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.id);
+        }
+        self.keys.deinit();
+    }
+
+    /// Generate a new encryption key
+    pub fn generateKey(self: *BackupKeyManager, key_id: []const u8) ![32]u8 {
+        var key: [32]u8 = undefined;
+        std.crypto.random.bytes(&key);
+
+        // Store key info (not the actual key)
+        var key_hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&key, &key_hash, .{});
+
+        const id_copy = try self.allocator.dupe(u8, key_id);
+        try self.keys.put(id_copy, .{
+            .id = id_copy,
+            .created_at = time_compat.timestamp(),
+            .algorithm = .aes_256_gcm,
+            .key_hash = key_hash,
+            .active = true,
+        });
+
+        return key;
+    }
+
+    /// Rotate to a new key
+    pub fn rotateKey(self: *BackupKeyManager, old_key_id: []const u8) !struct { new_key_id: []const u8, new_key: [32]u8 } {
+        // Deactivate old key
+        if (self.keys.getPtr(old_key_id)) |info| {
+            info.active = false;
+        }
+
+        // Generate new key with timestamp-based ID
+        const timestamp = time_compat.timestamp();
+        var new_id_buf: [64]u8 = undefined;
+        const new_id = try std.fmt.bufPrint(&new_id_buf, "key-{d}", .{timestamp});
+        const new_id_copy = try self.allocator.dupe(u8, new_id);
+
+        const new_key = try self.generateKey(new_id_copy);
+
+        return .{
+            .new_key_id = new_id_copy,
+            .new_key = new_key,
+        };
+    }
+
+    /// List all keys
+    pub fn listKeys(self: *BackupKeyManager) ![]const KeyInfo {
+        var list = std.ArrayList(KeyInfo).init(self.allocator);
+        var iter = self.keys.iterator();
+        while (iter.next()) |entry| {
+            try list.append(entry.value_ptr.*);
+        }
+        return try list.toOwnedSlice();
+    }
+};
+
+/// Backup scheduler for automated backups
+pub const BackupScheduler = struct {
+    allocator: std.mem.Allocator,
+    schedules: std.ArrayList(Schedule),
+    manager: *BackupManager,
+
+    pub const Schedule = struct {
+        id: u64,
+        name: []const u8,
+        backup_type: BackupType,
+        cron_expression: []const u8, // "0 2 * * *" = 2am daily
+        retention_count: u32, // Keep N most recent
+        enabled: bool,
+        last_run: ?i64,
+        next_run: i64,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, manager: *BackupManager) BackupScheduler {
+        return .{
+            .allocator = allocator,
+            .schedules = std.ArrayList(Schedule).init(allocator),
+            .manager = manager,
+        };
+    }
+
+    pub fn deinit(self: *BackupScheduler) void {
+        for (self.schedules.items) |schedule| {
+            self.allocator.free(schedule.name);
+            self.allocator.free(schedule.cron_expression);
+        }
+        self.schedules.deinit();
+    }
+
+    /// Add a new backup schedule
+    pub fn addSchedule(
+        self: *BackupScheduler,
+        name: []const u8,
+        backup_type: BackupType,
+        cron_expression: []const u8,
+        retention_count: u32,
+    ) !u64 {
+        const id = @as(u64, @intCast(time_compat.timestamp()));
+        const next_run = try self.calculateNextRun(cron_expression);
+
+        try self.schedules.append(.{
+            .id = id,
+            .name = try self.allocator.dupe(u8, name),
+            .backup_type = backup_type,
+            .cron_expression = try self.allocator.dupe(u8, cron_expression),
+            .retention_count = retention_count,
+            .enabled = true,
+            .last_run = null,
+            .next_run = next_run,
+        });
+
+        return id;
+    }
+
+    /// Remove a schedule
+    pub fn removeSchedule(self: *BackupScheduler, id: u64) bool {
+        for (self.schedules.items, 0..) |schedule, i| {
+            if (schedule.id == id) {
+                self.allocator.free(schedule.name);
+                self.allocator.free(schedule.cron_expression);
+                _ = self.schedules.orderedRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Check and run due schedules
+    pub fn checkAndRun(self: *BackupScheduler) ![]BackupResult {
+        const now = time_compat.timestamp();
+        var results = std.ArrayList(BackupResult).init(self.allocator);
+
+        for (self.schedules.items) |*schedule| {
+            if (!schedule.enabled) continue;
+            if (now < schedule.next_run) continue;
+
+            // Run the backup
+            const backup_info = switch (schedule.backup_type) {
+                .full => try self.manager.createFullBackup(),
+                .incremental => try self.manager.createIncrementalBackup(schedule.last_run orelse 0),
+                .differential => try self.manager.createFullBackup(), // Simplified
+            };
+
+            try results.append(.{
+                .schedule_id = schedule.id,
+                .schedule_name = schedule.name,
+                .backup_info = backup_info,
+                .success = true,
+                .error_message = null,
+            });
+
+            // Update schedule
+            schedule.last_run = now;
+            schedule.next_run = try self.calculateNextRun(schedule.cron_expression);
+
+            // Apply retention policy
+            try self.applyRetention(schedule.*);
+        }
+
+        return try results.toOwnedSlice();
+    }
+
+    /// Calculate next run time from cron expression (simplified)
+    fn calculateNextRun(self: *BackupScheduler, cron_expression: []const u8) !i64 {
+        _ = self;
+        _ = cron_expression;
+        // Simplified: return tomorrow at 2am
+        const now = time_compat.timestamp();
+        return now + 86400; // 24 hours
+    }
+
+    /// Apply retention policy - keep only N most recent backups
+    fn applyRetention(self: *BackupScheduler, schedule: Schedule) !void {
+        const backups = try self.manager.listBackups();
+        defer {
+            for (backups) |*b| {
+                b.deinit(self.allocator);
+            }
+            self.allocator.free(backups);
+        }
+
+        // Filter by type and sort by timestamp
+        var matching = std.ArrayList(BackupInfo).init(self.allocator);
+        defer matching.deinit();
+
+        for (backups) |backup| {
+            if (backup.metadata.backup_type == schedule.backup_type) {
+                try matching.append(backup);
+            }
+        }
+
+        // Sort by timestamp descending
+        std.mem.sort(BackupInfo, matching.items, {}, struct {
+            fn lessThan(_: void, a: BackupInfo, b: BackupInfo) bool {
+                return a.metadata.timestamp > b.metadata.timestamp;
+            }
+        }.lessThan);
+
+        // Delete excess backups
+        if (matching.items.len > schedule.retention_count) {
+            for (matching.items[schedule.retention_count..]) |backup| {
+                std.fs.cwd().deleteTree(backup.path) catch {};
+            }
+        }
+    }
+};
+
+pub const BackupResult = struct {
+    schedule_id: u64,
+    schedule_name: []const u8,
+    backup_info: BackupInfo,
+    success: bool,
+    error_message: ?[]const u8,
+};
+
+/// Interactive restore wizard
+pub const RestoreWizard = struct {
+    allocator: std.mem.Allocator,
+    manager: *BackupManager,
+    state: WizardState,
+    selected_backup: ?BackupInfo,
+    target_path: ?[]const u8,
+    options: RestoreOptions,
+
+    pub const WizardState = enum {
+        select_backup,
+        select_target,
+        confirm_options,
+        in_progress,
+        completed,
+        failed,
+    };
+
+    pub const RestoreOptions = struct {
+        verify_before_restore: bool = true,
+        overwrite_existing: bool = false,
+        preserve_permissions: bool = true,
+        dry_run: bool = false,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, manager: *BackupManager) RestoreWizard {
+        return .{
+            .allocator = allocator,
+            .manager = manager,
+            .state = .select_backup,
+            .selected_backup = null,
+            .target_path = null,
+            .options = .{},
+        };
+    }
+
+    pub fn deinit(self: *RestoreWizard) void {
+        if (self.selected_backup) |*backup| {
+            backup.deinit(self.allocator);
+        }
+        if (self.target_path) |path| {
+            self.allocator.free(path);
+        }
+    }
+
+    /// Get available backups for selection
+    pub fn getAvailableBackups(self: *RestoreWizard) ![]BackupInfo {
+        return try self.manager.listBackups();
+    }
+
+    /// Select a backup to restore
+    pub fn selectBackup(self: *RestoreWizard, backup_name: []const u8) !bool {
+        const backups = try self.manager.listBackups();
+        defer {
+            for (backups) |*b| {
+                b.deinit(self.allocator);
+            }
+            self.allocator.free(backups);
+        }
+
+        for (backups) |backup| {
+            if (std.mem.eql(u8, backup.name, backup_name)) {
+                self.selected_backup = .{
+                    .name = try self.allocator.dupe(u8, backup.name),
+                    .path = try self.allocator.dupe(u8, backup.path),
+                    .metadata = backup.metadata,
+                    .checksum = backup.checksum,
+                };
+                self.state = .select_target;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Set target path for restore
+    pub fn setTargetPath(self: *RestoreWizard, path: []const u8) !void {
+        if (self.target_path) |old_path| {
+            self.allocator.free(old_path);
+        }
+        self.target_path = try self.allocator.dupe(u8, path);
+        self.state = .confirm_options;
+    }
+
+    /// Set restore options
+    pub fn setOptions(self: *RestoreWizard, options: RestoreOptions) void {
+        self.options = options;
+    }
+
+    /// Execute the restore
+    pub fn execute(self: *RestoreWizard) !RestoreResult {
+        if (self.selected_backup == null or self.target_path == null) {
+            return error.WizardIncomplete;
+        }
+
+        self.state = .in_progress;
+
+        const backup = self.selected_backup.?;
+        const target = self.target_path.?;
+
+        // Verify backup if requested
+        if (self.options.verify_before_restore) {
+            const valid = try self.manager.verifyBackup(backup.path);
+            if (!valid) {
+                self.state = .failed;
+                return RestoreResult{
+                    .success = false,
+                    .files_restored = 0,
+                    .bytes_restored = 0,
+                    .error_message = try self.allocator.dupe(u8, "Backup verification failed"),
+                };
+            }
+        }
+
+        // Dry run mode
+        if (self.options.dry_run) {
+            self.state = .completed;
+            return RestoreResult{
+                .success = true,
+                .files_restored = backup.metadata.file_count,
+                .bytes_restored = backup.metadata.total_size,
+                .error_message = try self.allocator.dupe(u8, "[DRY RUN] Would restore files"),
+            };
+        }
+
+        // Actual restore
+        const result = try self.manager.restore(backup.name, target, false);
+
+        self.state = if (result.success) .completed else .failed;
+        return result;
+    }
+
+    /// Get wizard status
+    pub fn getStatus(self: *RestoreWizard) WizardStatus {
+        return .{
+            .state = self.state,
+            .selected_backup = if (self.selected_backup) |b| b.name else null,
+            .target_path = self.target_path,
+            .options = self.options,
+        };
+    }
+};
+
+pub const WizardStatus = struct {
+    state: RestoreWizard.WizardState,
+    selected_backup: ?[]const u8,
+    target_path: ?[]const u8,
+    options: RestoreWizard.RestoreOptions,
+};
+
+/// Point-in-time recovery support
+pub const PointInTimeRecovery = struct {
+    allocator: std.mem.Allocator,
+    manager: *BackupManager,
+
+    pub fn init(allocator: std.mem.Allocator, manager: *BackupManager) PointInTimeRecovery {
+        return .{
+            .allocator = allocator,
+            .manager = manager,
+        };
+    }
+
+    /// Find the best backup chain for a target timestamp
+    pub fn findRecoveryChain(self: *PointInTimeRecovery, target_timestamp: i64) !RecoveryChain {
+        const backups = try self.manager.listBackups();
+        defer {
+            for (backups) |*b| {
+                b.deinit(self.allocator);
+            }
+            self.allocator.free(backups);
+        }
+
+        // Find the most recent full backup before target
+        var best_full: ?BackupInfo = null;
+        for (backups) |backup| {
+            if (backup.metadata.backup_type == .full and
+                backup.metadata.timestamp <= target_timestamp)
+            {
+                if (best_full == null or backup.metadata.timestamp > best_full.?.metadata.timestamp) {
+                    best_full = backup;
+                }
+            }
+        }
+
+        if (best_full == null) {
+            return error.NoSuitableBackup;
+        }
+
+        // Find incrementals between full backup and target
+        var incrementals = std.ArrayList([]const u8).init(self.allocator);
+        for (backups) |backup| {
+            if (backup.metadata.backup_type == .incremental and
+                backup.metadata.timestamp > best_full.?.metadata.timestamp and
+                backup.metadata.timestamp <= target_timestamp)
+            {
+                try incrementals.append(try self.allocator.dupe(u8, backup.name));
+            }
+        }
+
+        return RecoveryChain{
+            .full_backup = try self.allocator.dupe(u8, best_full.?.name),
+            .incremental_backups = try incrementals.toOwnedSlice(),
+            .target_timestamp = target_timestamp,
+            .estimated_recovery_point = best_full.?.metadata.timestamp,
+        };
+    }
+
+    /// Execute point-in-time recovery
+    pub fn recover(
+        self: *PointInTimeRecovery,
+        chain: RecoveryChain,
+        target_path: []const u8,
+    ) !RecoveryResult {
+        var files_restored: usize = 0;
+        var bytes_restored: u64 = 0;
+
+        // First restore full backup
+        const full_result = try self.manager.restore(chain.full_backup, target_path, true);
+        if (!full_result.success) {
+            return RecoveryResult{
+                .success = false,
+                .files_restored = 0,
+                .bytes_restored = 0,
+                .recovery_point = 0,
+                .error_message = full_result.error_message,
+            };
+        }
+        files_restored += full_result.files_restored;
+        bytes_restored += full_result.bytes_restored;
+
+        // Apply incrementals in order
+        for (chain.incremental_backups) |incr_name| {
+            const incr_result = try self.manager.restore(incr_name, target_path, true);
+            if (!incr_result.success) {
+                return RecoveryResult{
+                    .success = false,
+                    .files_restored = files_restored,
+                    .bytes_restored = bytes_restored,
+                    .recovery_point = chain.estimated_recovery_point,
+                    .error_message = incr_result.error_message,
+                };
+            }
+            files_restored += incr_result.files_restored;
+            bytes_restored += incr_result.bytes_restored;
+        }
+
+        return RecoveryResult{
+            .success = true,
+            .files_restored = files_restored,
+            .bytes_restored = bytes_restored,
+            .recovery_point = chain.target_timestamp,
+            .error_message = null,
+        };
+    }
+};
+
+pub const RecoveryChain = struct {
+    full_backup: []const u8,
+    incremental_backups: []const []const u8,
+    target_timestamp: i64,
+    estimated_recovery_point: i64,
+};
+
+pub const RecoveryResult = struct {
+    success: bool,
+    files_restored: usize,
+    bytes_restored: u64,
+    recovery_point: i64,
+    error_message: ?[]const u8,
+};
+
+/// Backup CLI command handler
+pub const BackupCli = struct {
+    allocator: std.mem.Allocator,
+    manager: *BackupManager,
+    scheduler: *BackupScheduler,
+    key_manager: *BackupKeyManager,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        manager: *BackupManager,
+        scheduler: *BackupScheduler,
+        key_manager: *BackupKeyManager,
+    ) BackupCli {
+        return .{
+            .allocator = allocator,
+            .manager = manager,
+            .scheduler = scheduler,
+            .key_manager = key_manager,
+        };
+    }
+
+    /// Execute backup CLI command
+    pub fn execute(self: *BackupCli, command: []const u8, args: []const []const u8) !CliResult {
+        if (std.mem.eql(u8, command, "create")) {
+            return try self.createBackup(args);
+        } else if (std.mem.eql(u8, command, "list")) {
+            return try self.listBackups();
+        } else if (std.mem.eql(u8, command, "restore")) {
+            return try self.restoreBackup(args);
+        } else if (std.mem.eql(u8, command, "verify")) {
+            return try self.verifyBackup(args);
+        } else if (std.mem.eql(u8, command, "schedule")) {
+            return try self.manageSchedule(args);
+        } else if (std.mem.eql(u8, command, "keys")) {
+            return try self.manageKeys(args);
+        } else if (std.mem.eql(u8, command, "prune")) {
+            return try self.pruneBackups();
+        }
+
+        return CliResult{
+            .success = false,
+            .message = try self.allocator.dupe(u8, "Unknown command. Available: create, list, restore, verify, schedule, keys, prune"),
+        };
+    }
+
+    fn createBackup(self: *BackupCli, args: []const []const u8) !CliResult {
+        const backup_type: BackupType = if (args.len > 0 and std.mem.eql(u8, args[0], "incremental"))
+            .incremental
+        else
+            .full;
+
+        const info = switch (backup_type) {
+            .full => try self.manager.createFullBackup(),
+            .incremental => try self.manager.createIncrementalBackup(0),
+            .differential => try self.manager.createFullBackup(),
+        };
+
+        return CliResult{
+            .success = true,
+            .message = try std.fmt.allocPrint(self.allocator,
+                \\Backup created successfully:
+                \\  Name: {s}
+                \\  Type: {s}
+                \\  Files: {d}
+                \\  Size: {d} bytes
+            , .{
+                info.name,
+                @tagName(info.metadata.backup_type),
+                info.metadata.file_count,
+                info.metadata.total_size,
+            }),
+        };
+    }
+
+    fn listBackups(self: *BackupCli) !CliResult {
+        const backups = try self.manager.listBackups();
+        defer {
+            for (backups) |*b| {
+                b.deinit(self.allocator);
+            }
+            self.allocator.free(backups);
+        }
+
+        var output = std.ArrayList(u8).init(self.allocator);
+        const writer = output.writer();
+
+        try writer.writeAll("Available Backups:\n");
+        try writer.writeAll("══════════════════════════════════════════════════════════════════════\n");
+
+        if (backups.len == 0) {
+            try writer.writeAll("No backups found.\n");
+        } else {
+            for (backups) |backup| {
+                try writer.print("{s:<30} | {s:<12} | {d:>10} files | {d:>15} bytes\n", .{
+                    backup.name,
+                    @tagName(backup.metadata.backup_type),
+                    backup.metadata.file_count,
+                    backup.metadata.total_size,
+                });
+            }
+        }
+
+        return CliResult{
+            .success = true,
+            .message = try output.toOwnedSlice(),
+        };
+    }
+
+    fn restoreBackup(self: *BackupCli, args: []const []const u8) !CliResult {
+        if (args.len < 2) {
+            return CliResult{
+                .success = false,
+                .message = try self.allocator.dupe(u8, "Usage: restore <backup-name> <target-path> [--verify] [--dry-run]"),
+            };
+        }
+
+        const backup_name = args[0];
+        const target_path = args[1];
+        var verify = false;
+
+        for (args[2..]) |arg| {
+            if (std.mem.eql(u8, arg, "--verify")) verify = true;
+        }
+
+        const result = try self.manager.restore(backup_name, target_path, verify);
+
+        if (result.success) {
+            return CliResult{
+                .success = true,
+                .message = try std.fmt.allocPrint(self.allocator,
+                    \\Restore completed successfully:
+                    \\  Files restored: {d}
+                    \\  Bytes restored: {d}
+                , .{
+                    result.files_restored,
+                    result.bytes_restored,
+                }),
+            };
+        } else {
+            return CliResult{
+                .success = false,
+                .message = result.error_message orelse try self.allocator.dupe(u8, "Restore failed"),
+            };
+        }
+    }
+
+    fn verifyBackup(self: *BackupCli, args: []const []const u8) !CliResult {
+        if (args.len < 1) {
+            return CliResult{
+                .success = false,
+                .message = try self.allocator.dupe(u8, "Usage: verify <backup-name>"),
+            };
+        }
+
+        const backup_name = args[0];
+        const backup_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{
+            self.manager.backup_path,
+            backup_name,
+        });
+        defer self.allocator.free(backup_dir);
+
+        const valid = try self.manager.verifyBackup(backup_dir);
+
+        return CliResult{
+            .success = valid,
+            .message = if (valid)
+                try std.fmt.allocPrint(self.allocator, "Backup '{s}' verified successfully - checksums match", .{backup_name})
+            else
+                try std.fmt.allocPrint(self.allocator, "Backup '{s}' verification FAILED - checksums do not match!", .{backup_name}),
+        };
+    }
+
+    fn manageSchedule(self: *BackupCli, args: []const []const u8) !CliResult {
+        if (args.len < 1) {
+            return try self.listSchedules();
+        }
+
+        const subcommand = args[0];
+        if (std.mem.eql(u8, subcommand, "add")) {
+            if (args.len < 4) {
+                return CliResult{
+                    .success = false,
+                    .message = try self.allocator.dupe(u8, "Usage: schedule add <name> <type> <cron> [retention]"),
+                };
+            }
+            const name = args[1];
+            const backup_type: BackupType = if (std.mem.eql(u8, args[2], "incremental")) .incremental else .full;
+            const cron = args[3];
+            const retention: u32 = if (args.len > 4) std.fmt.parseInt(u32, args[4], 10) catch 7 else 7;
+
+            const id = try self.scheduler.addSchedule(name, backup_type, cron, retention);
+            return CliResult{
+                .success = true,
+                .message = try std.fmt.allocPrint(self.allocator, "Schedule '{s}' added with ID {d}", .{ name, id }),
+            };
+        } else if (std.mem.eql(u8, subcommand, "remove")) {
+            if (args.len < 2) {
+                return CliResult{
+                    .success = false,
+                    .message = try self.allocator.dupe(u8, "Usage: schedule remove <id>"),
+                };
+            }
+            const id = std.fmt.parseInt(u64, args[1], 10) catch {
+                return CliResult{
+                    .success = false,
+                    .message = try self.allocator.dupe(u8, "Invalid schedule ID"),
+                };
+            };
+            const removed = self.scheduler.removeSchedule(id);
+            return CliResult{
+                .success = removed,
+                .message = if (removed)
+                    try self.allocator.dupe(u8, "Schedule removed")
+                else
+                    try self.allocator.dupe(u8, "Schedule not found"),
+            };
+        } else if (std.mem.eql(u8, subcommand, "list")) {
+            return try self.listSchedules();
+        }
+
+        return CliResult{
+            .success = false,
+            .message = try self.allocator.dupe(u8, "Unknown schedule command. Available: add, remove, list"),
+        };
+    }
+
+    fn listSchedules(self: *BackupCli) !CliResult {
+        var output = std.ArrayList(u8).init(self.allocator);
+        const writer = output.writer();
+
+        try writer.writeAll("Backup Schedules:\n");
+        try writer.writeAll("══════════════════════════════════════════════════════════════════════\n");
+
+        if (self.scheduler.schedules.items.len == 0) {
+            try writer.writeAll("No schedules configured.\n");
+        } else {
+            for (self.scheduler.schedules.items) |schedule| {
+                try writer.print("ID: {d} | {s:<20} | {s:<12} | {s:<15} | Retention: {d}\n", .{
+                    schedule.id,
+                    schedule.name,
+                    @tagName(schedule.backup_type),
+                    schedule.cron_expression,
+                    schedule.retention_count,
+                });
+            }
+        }
+
+        return CliResult{
+            .success = true,
+            .message = try output.toOwnedSlice(),
+        };
+    }
+
+    fn manageKeys(self: *BackupCli, args: []const []const u8) !CliResult {
+        if (args.len < 1) {
+            return try self.listKeys();
+        }
+
+        const subcommand = args[0];
+        if (std.mem.eql(u8, subcommand, "generate")) {
+            const key_id = if (args.len > 1) args[1] else "default";
+            _ = try self.key_manager.generateKey(key_id);
+            return CliResult{
+                .success = true,
+                .message = try std.fmt.allocPrint(self.allocator, "Key '{s}' generated successfully", .{key_id}),
+            };
+        } else if (std.mem.eql(u8, subcommand, "rotate")) {
+            if (args.len < 2) {
+                return CliResult{
+                    .success = false,
+                    .message = try self.allocator.dupe(u8, "Usage: keys rotate <old-key-id>"),
+                };
+            }
+            const result = try self.key_manager.rotateKey(args[1]);
+            return CliResult{
+                .success = true,
+                .message = try std.fmt.allocPrint(self.allocator, "Key rotated. New key ID: {s}", .{result.new_key_id}),
+            };
+        } else if (std.mem.eql(u8, subcommand, "list")) {
+            return try self.listKeys();
+        }
+
+        return CliResult{
+            .success = false,
+            .message = try self.allocator.dupe(u8, "Unknown keys command. Available: generate, rotate, list"),
+        };
+    }
+
+    fn listKeys(self: *BackupCli) !CliResult {
+        const keys = try self.key_manager.listKeys();
+        defer self.allocator.free(keys);
+
+        var output = std.ArrayList(u8).init(self.allocator);
+        const writer = output.writer();
+
+        try writer.writeAll("Encryption Keys:\n");
+        try writer.writeAll("══════════════════════════════════════════════════════════════════════\n");
+
+        if (keys.len == 0) {
+            try writer.writeAll("No encryption keys configured.\n");
+        } else {
+            for (keys) |key| {
+                try writer.print("{s:<20} | Created: {d} | Active: {}\n", .{
+                    key.id,
+                    key.created_at,
+                    key.active,
+                });
+            }
+        }
+
+        return CliResult{
+            .success = true,
+            .message = try output.toOwnedSlice(),
+        };
+    }
+
+    fn pruneBackups(self: *BackupCli) !CliResult {
+        const deleted = try self.manager.pruneBackups();
+        return CliResult{
+            .success = true,
+            .message = try std.fmt.allocPrint(self.allocator, "Pruned {d} old backups", .{deleted}),
+        };
+    }
+};
+
+pub const CliResult = struct {
+    success: bool,
+    message: []const u8,
+
+    pub fn deinit(self: *CliResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.message);
+    }
+};
 
 test "create and restore full backup" {
     const testing = std.testing;

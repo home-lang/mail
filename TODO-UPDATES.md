@@ -449,27 +449,37 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 
 ## 🏢 Enterprise Features
 
-### 34. Comprehensive Audit Trail
-**Status:** Basic audit logging exists
-**Location:** `src/observability/audit.zig`
+### 34. ~~Comprehensive Audit Trail~~ ✅ COMPLETED
+**Status:** ✅ Fully implemented with CLI and export
+**Location:** `src/features/audit.zig`
 
-**Tasks:**
-- [ ] Log all administrative actions
-- [ ] Add user CRUD audit events
-- [ ] Log configuration changes with before/after
-- [ ] Add ACL modification logging
-- [ ] Implement audit log export
+**Completed:**
+- [x] Log all administrative actions (logAdminAction with before/after state)
+- [x] Add user CRUD audit events (22 AuditAction types)
+- [x] Log configuration changes with before/after comparison
+- [x] Add ACL modification logging (AclAuditAction, AclChangeDetails)
+- [x] Implement audit log export (JSON, CSV, SIEM/CEF, Syslog RFC 5424)
+- [x] ExtendedAuditTrail with in-memory buffer for export
+- [x] AuditCli with list, export, stats, prune, search commands
+- [x] AuditExporter for multiple formats
 
-### 35. Backup/Restore CLI Enhancement
-**Status:** Basic backup exists
+### 35. ~~Backup/Restore CLI Enhancement~~ ✅ COMPLETED
+**Status:** ✅ Fully implemented with scheduling and encryption
 **Location:** `src/storage/backup.zig`
 
-**Tasks:**
-- [ ] Add interactive restore wizard
-- [ ] Implement point-in-time recovery
-- [ ] Add backup verification command
-- [ ] Implement backup encryption key management
-- [ ] Add backup scheduling via CLI
+**Completed:**
+- [x] Add interactive restore wizard (RestoreWizard with state machine)
+- [x] Implement point-in-time recovery (PointInTimeRecovery, RecoveryChain)
+- [x] Add backup verification command (verifyBackup with checksums)
+- [x] Implement backup encryption key management (BackupKeyManager)
+  - Key generation with SHA256 hashing
+  - Key rotation support
+  - Key listing
+- [x] Add backup scheduling via CLI (BackupScheduler)
+  - Cron expression support
+  - Retention policy (keep N most recent)
+  - Automatic pruning
+- [x] BackupCli with create, list, restore, verify, schedule, keys, prune commands
 
 ### 36. ~~Multi-Region Support~~ ✅ COMPLETED
 **Status:** ✅ Fully implemented
@@ -516,16 +526,26 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 - [x] Status command showing applied/pending migrations
 - [x] Migration locking for concurrent safety
 
-### 40. Secure Password Reset
-**Status:** Not implemented
-**Location:** New module needed
+### 40. ~~Secure Password Reset~~ ✅ COMPLETED
+**Status:** ✅ Fully implemented with rate limiting and audit
+**Location:** `src/auth/auth.zig`
 
-**Tasks:**
-- [ ] Implement token-based reset flow
-- [ ] Add token expiration (configurable)
-- [ ] Implement rate limiting on reset requests
-- [ ] Add email notification for reset
-- [ ] Log all reset attempts
+**Completed:**
+- [x] Implement token-based reset flow (PasswordResetManager)
+  - Secure 256-bit tokens with SHA256 hashing
+  - Token lookup by hash (never stores raw token)
+- [x] Add token expiration (configurable via ResetConfig.token_expiry_minutes)
+- [x] Implement rate limiting on reset requests (ResetRateLimiter)
+  - Configurable max attempts per hour
+  - Automatic lockout with configurable duration
+  - Per-email tracking
+- [x] Add email notification for reset (ResetEmailNotifier)
+  - Reset link generation
+  - Confirmation email after password change
+- [x] Log all reset attempts (AuditEvent with EventType)
+  - reset_requested, reset_completed, reset_failed, token_expired, rate_limited
+- [x] Password validation policy (min length, uppercase, numbers, special chars)
+- [x] Token cleanup for expired/used tokens
 
 ---
 

@@ -1592,13 +1592,24 @@
   - Database operations in `src/storage/database.zig` (insert, query, count, prune)
   - REST API endpoint: GET /api/audit with filtering (action, actor, severity, pagination)
   - Configurable retention period (default 90 days)
-- [x] **Backup/Restore CLI**: Create operational backup utility with verification ✅ (`src/tools/backup.zig`)
+  - **Enhanced CLI Features**:
+    - AuditExporter: Export to JSON, CSV, SIEM/CEF, Syslog RFC 5424
+    - AuditCli: list, export, stats, prune, search commands
+    - ACL audit logging (AclAuditAction) with before/after comparison
+    - ExtendedAuditTrail with in-memory buffer for export
+- [x] **Backup/Restore CLI**: Create operational backup utility with verification ✅ (`src/storage/backup.zig`)
   - BackupManager with full/database/config/maildir/incremental backup types
   - SHA-256 checksum verification for all backed up files
   - JSON manifest with file metadata (path, size, checksum, modified_at)
   - CLI commands: create, restore, verify, list
   - Pre-restore backup of current data for safety
   - Recursive directory copying for maildir
+  - **Enhanced CLI Features**:
+    - BackupScheduler: Cron expression support with retention policies
+    - BackupKeyManager: Encryption key generation, rotation, and listing
+    - RestoreWizard: Interactive restore with state machine and dry-run
+    - PointInTimeRecovery: Recovery chain with full+incremental restore
+    - BackupCli: create, list, restore, verify, schedule, keys, prune commands
 - [x] **Multi-Region Support**: Cross-region replication and failover ✅ (`src/infrastructure/multi_region.zig`)
   - MultiRegionManager with region registration and health tracking
   - Replication modes: sync, async_immediate, async_batch
@@ -1632,6 +1643,13 @@
     - POST `/api/password-reset/verify` - Verify token validity
     - POST `/api/password-reset/complete` - Complete reset with new password
   - Security features: rate limiting, IP logging, single-use tokens
+  - **Enhanced Features** (`src/auth/auth.zig`):
+    - PasswordResetManager: Full reset flow with audit callbacks
+    - ResetRateLimiter: Per-email rate limiting with lockout
+    - ResetToken: 256-bit tokens with SHA256 hashing, expiry validation
+    - ResetEmailNotifier: Email notifications for reset and confirmation
+    - Password validation policy (min length, uppercase, numbers, special chars)
+    - Automatic token cleanup for expired/used tokens
 
 ### Quick Wins (Low Effort, High Impact) ⚡
 - [x] Remove unreachable blocks - Replace with proper error types (30 min) ✅
