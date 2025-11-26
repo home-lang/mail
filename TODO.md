@@ -51,6 +51,21 @@
   - Backends: Slack, Discord, PagerDuty, OpsGenie, Email, Generic webhooks
   - Alert rules with threshold/rate conditions
   - De-duplication and Prometheus Alertmanager support
+- ✅ **Secret Management**: Multi-backend secret storage (`src/security/secrets.zig`)
+  - SecretManager with unified interface for all backends
+  - HashiCorp Vault (Token/AppRole auth, KV v1/v2, namespaces)
+  - Kubernetes Secrets (mounted volumes, API access)
+  - AWS Secrets Manager (SigV4 signing, IAM roles)
+  - Azure Key Vault (managed identity, service principal)
+  - Caching with TTL, secure memory zeroing, thread-safety
+- ✅ **K8s Health Probes**: Production-ready Kubernetes probes (`src/api/health.zig`)
+  - `/ready`, `/readyz` - Readiness probe (connection capacity, database, uptime)
+  - `/live`, `/livez` - Liveness probe (memory, event loop)
+  - `/startup` - Startup probe (initialization checks)
+- ✅ **Algorithm Documentation**: Comprehensive inline documentation
+  - SPF: RFC 7208 algorithm, CIDR matching, mechanism evaluation
+  - Cluster: Raft consensus, leader election, heartbeat mechanism
+  - Encryption: AES-256-GCM, HKDF key derivation, serialization format
 - 🎉 **Enterprise Milestone**: Phase 11 - Audit Trail + Password Reset + Backup complete!
 
 ### v0.28.0 (2025-10-24) - Performance, Reliability & Testing Infrastructure 🚀
@@ -1319,7 +1334,14 @@
   - CLI arg: `--config <path>` and env var: `SMTP_CONFIG_FILE`
   - Priority order: CLI args > env vars > config file > profile defaults
   - Integrated into `loadConfig()` startup flow
-- [ ] **Secret Management**: Integrate HashiCorp Vault, K8s Secrets, AWS Secrets Manager
+- [x] **Secret Management**: Multi-backend secret storage implemented ✅ (`src/security/secrets.zig`)
+  - SecretManager with unified interface for all backends
+  - **HashiCorp Vault**: Token auth, AppRole auth, KV v1/v2 support, namespace support
+  - **Kubernetes Secrets**: Mounted volumes and API-based access
+  - **AWS Secrets Manager**: SigV4 signing, IAM role support, custom endpoints
+  - **Azure Key Vault**: Managed identity and service principal auth
+  - **File-based**: Development-only backend for local testing
+  - Features: Caching with TTL, secure memory zeroing, statistics, thread-safety
 - [x] **Hot Reload**: Implement SIGHUP config reload without restart ✅ (`src/core/hot_reload.zig`)
   - HotReloadManager with callback notifications
   - SIGHUP signal handler in main.zig

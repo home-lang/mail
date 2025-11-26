@@ -2,6 +2,172 @@ const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
 const logger = @import("../core/logger.zig");
 
+// =============================================================================
+// Secret Management - Multi-Backend Secret Storage
+// =============================================================================
+//
+// ## Overview
+// Provides a unified interface for retrieving secrets from various backends,
+// enabling secure credential management in production deployments without
+// hardcoding sensitive values.
+//
+// ## Supported Backends
+//
+// | Backend              | Use Case                      | Auth Method           |
+// |---------------------|-------------------------------|----------------------|
+// | Environment         | Development, simple deploys   | N/A                  |
+// | HashiCorp Vault     | Enterprise, multi-tenant      | Token, AppRole       |
+// | Kubernetes Secrets  | K8s deployments               | Mounted volumes, API |
+// | AWS Secrets Manager | AWS cloud deployments         | IAM Role, Access Keys|
+// | Azure Key Vault     | Azure cloud deployments       | Managed Identity, SP |
+// | File                | Development only              | File system          |
+//
+// ## Architecture
+//
+// ```
+//                     ┌─────────────────────┐
+//                     │   SecretManager     │
+//                     │  (Unified Interface)│
+//                     └──────────┬──────────┘
+//                                │
+//          ┌──────────┬─────────┼─────────┬──────────┐
+//          ▼          ▼         ▼         ▼          ▼
+//     ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+//     │  Vault │ │  K8s   │ │  AWS   │ │ Azure  │ │  File  │
+//     │Backend │ │Backend │ │Backend │ │Backend │ │Backend │
+//     └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
+// ```
+//
+// ## HashiCorp Vault Integration
+//
+// ### Authentication Methods
+// 1. **Token Auth**: Direct token (for development/testing)
+// 2. **AppRole Auth**: Machine-to-machine (recommended for production)
+//
+// ### AppRole Flow
+// ```
+// 1. Application has role_id (semi-public) and secret_id (private)
+// 2. POST /v1/auth/approle/login {role_id, secret_id}
+// 3. Receive client_token with TTL
+// 4. Use token for subsequent secret reads
+// 5. Token auto-renewed before expiry
+// ```
+//
+// ### KV v2 Secret Path
+// ```
+// GET /v1/{mount}/data/{path}
+//
+// Response:
+// {
+//   "data": {
+//     "data": {"value": "secret-value"},
+//     "metadata": {"version": 3, "created_time": "..."}
+//   }
+// }
+// ```
+//
+// ## AWS Secrets Manager Integration
+//
+// ### Authentication
+// - **IAM Role** (recommended): Automatic via instance metadata
+// - **Access Keys**: Explicit credentials (use only when necessary)
+//
+// ### API Request Signing (SigV4)
+// ```
+// 1. Create canonical request (method, path, query, headers, payload)
+// 2. Create string to sign (algorithm, timestamp, scope, canonical hash)
+// 3. Calculate signing key (HMAC chain: date → region → service → request)
+// 4. Calculate signature (HMAC of string to sign)
+// 5. Add Authorization header
+// ```
+//
+// ### GetSecretValue API
+// ```
+// POST / HTTP/1.1
+// Host: secretsmanager.{region}.amazonaws.com
+// X-Amz-Target: secretsmanager.GetSecretValue
+// Content-Type: application/x-amz-json-1.1
+//
+// {"SecretId": "my-secret"}
+// ```
+//
+// ## Kubernetes Secrets Integration
+//
+// ### Mounted Volumes (Recommended)
+// Secrets mounted at `/var/run/secrets/{secret-name}`:
+// ```yaml
+// volumes:
+//   - name: db-credentials
+//     secret:
+//       secretName: db-credentials
+// volumeMounts:
+//   - name: db-credentials
+//     mountPath: /var/run/secrets/db-credentials
+// ```
+//
+// ### Kubernetes API
+// ```
+// GET /api/v1/namespaces/{ns}/secrets/{name}
+// Authorization: Bearer {service-account-token}
+// ```
+//
+// ## Caching Strategy
+//
+// ```
+// ┌──────────────┐     Cache Hit      ┌──────────────┐
+// │   Request    │ ─────────────────▶ │ Return Value │
+// └──────────────┘                    └──────────────┘
+//        │
+//        │ Cache Miss
+//        ▼
+// ┌──────────────┐     Fetch          ┌──────────────┐
+// │   Backend    │ ─────────────────▶ │ Cache + TTL  │
+// └──────────────┘                    └──────────────┘
+// ```
+//
+// - Default TTL: 5 minutes (300 seconds)
+// - Secrets zeroed from memory on eviction
+// - Thread-safe with mutex protection
+//
+// ## Security Best Practices
+//
+// 1. **Never log secrets**: Use redaction in all logging
+// 2. **Zero memory**: `@memset(secret, 0)` before freeing
+// 3. **Minimal TTL**: Cache only as long as needed
+// 4. **Rotate regularly**: Use secret versioning
+// 5. **Audit access**: Enable backend audit logging
+//
+// ## Configuration Examples
+//
+// ### HashiCorp Vault
+// ```zig
+// var secrets = SecretManager.init(allocator, .vault);
+// try secrets.configureVault(.{
+//     .address = "https://vault.example.com:8200",
+//     .role_id = "db-app-role",
+//     .secret_id = std.posix.getenv("VAULT_SECRET_ID"),
+//     .mount_path = "secret",
+// });
+// ```
+//
+// ### AWS Secrets Manager
+// ```zig
+// var secrets = SecretManager.init(allocator, .aws_secrets_manager);
+// secrets.configureAws(.{
+//     .region = "us-west-2",
+//     // IAM role used automatically on EC2/ECS/Lambda
+// });
+// ```
+//
+// ### Kubernetes
+// ```zig
+// var secrets = SecretManager.init(allocator, .kubernetes);
+// secrets.configureKubernetes(.{
+//     .secrets_path = "/var/run/secrets",
+// });
+// ```
+// =============================================================================
+
 /// Secret Management Integration
 /// Provides unified interface for retrieving secrets from various backends:
 /// - Environment variables (default)
@@ -469,6 +635,346 @@ pub const SecretStats = struct {
         const total = self.cache_hits + self.cache_misses;
         if (total == 0) return 0.0;
         return @as(f64, @floatFromInt(self.cache_hits)) / @as(f64, @floatFromInt(total));
+    }
+};
+
+// =============================================================================
+// Vault HTTP Request Builder
+// =============================================================================
+
+/// Builds HTTP requests for HashiCorp Vault API
+pub const VaultRequestBuilder = struct {
+    allocator: std.mem.Allocator,
+    config: VaultConfig,
+    token: ?[]const u8,
+
+    pub fn init(allocator: std.mem.Allocator, config: VaultConfig, token: ?[]const u8) VaultRequestBuilder {
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .token = token,
+        };
+    }
+
+    /// Build KV v2 read request
+    /// GET /v1/{mount}/data/{path}
+    pub fn buildReadRequest(self: *VaultRequestBuilder, secret_path: []const u8) !VaultRequest {
+        const path = if (self.config.kv_version == 2)
+            try std.fmt.allocPrint(self.allocator, "/v1/{s}/data/{s}", .{ self.config.mount_path, secret_path })
+        else
+            try std.fmt.allocPrint(self.allocator, "/v1/{s}/{s}", .{ self.config.mount_path, secret_path });
+
+        var headers = std.ArrayList(Header).init(self.allocator);
+        try headers.append(.{ .name = "X-Vault-Token", .value = self.token orelse "" });
+        if (self.config.namespace) |ns| {
+            try headers.append(.{ .name = "X-Vault-Namespace", .value = ns });
+        }
+
+        return VaultRequest{
+            .method = "GET",
+            .path = path,
+            .headers = try headers.toOwnedSlice(),
+            .body = null,
+            .allocator = self.allocator,
+        };
+    }
+
+    /// Build AppRole login request
+    /// POST /v1/auth/approle/login
+    pub fn buildAppRoleLogin(self: *VaultRequestBuilder, role_id: []const u8, secret_id: []const u8) !VaultRequest {
+        const path = try self.allocator.dupe(u8, "/v1/auth/approle/login");
+        const body = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"role_id\":\"{s}\",\"secret_id\":\"{s}\"}}",
+            .{ role_id, secret_id },
+        );
+
+        var headers = std.ArrayList(Header).init(self.allocator);
+        try headers.append(.{ .name = "Content-Type", .value = "application/json" });
+
+        return VaultRequest{
+            .method = "POST",
+            .path = path,
+            .headers = try headers.toOwnedSlice(),
+            .body = body,
+            .allocator = self.allocator,
+        };
+    }
+
+    /// Build token renewal request
+    /// POST /v1/auth/token/renew-self
+    pub fn buildTokenRenewal(self: *VaultRequestBuilder) !VaultRequest {
+        const path = try self.allocator.dupe(u8, "/v1/auth/token/renew-self");
+
+        var headers = std.ArrayList(Header).init(self.allocator);
+        try headers.append(.{ .name = "X-Vault-Token", .value = self.token orelse "" });
+        try headers.append(.{ .name = "Content-Type", .value = "application/json" });
+
+        return VaultRequest{
+            .method = "POST",
+            .path = path,
+            .headers = try headers.toOwnedSlice(),
+            .body = try self.allocator.dupe(u8, "{}"),
+            .allocator = self.allocator,
+        };
+    }
+};
+
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const VaultRequest = struct {
+    method: []const u8,
+    path: []const u8,
+    headers: []Header,
+    body: ?[]const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *VaultRequest) void {
+        self.allocator.free(self.path);
+        if (self.body) |b| self.allocator.free(b);
+        self.allocator.free(self.headers);
+    }
+
+    /// Format as HTTP request string
+    pub fn toHttpRequest(self: *const VaultRequest, host: []const u8, allocator: std.mem.Allocator) ![]u8 {
+        var request = std.ArrayList(u8).init(allocator);
+        errdefer request.deinit();
+
+        // Request line
+        try request.writer().print("{s} {s} HTTP/1.1\r\n", .{ self.method, self.path });
+
+        // Host header
+        try request.writer().print("Host: {s}\r\n", .{host});
+
+        // Custom headers
+        for (self.headers) |header| {
+            try request.writer().print("{s}: {s}\r\n", .{ header.name, header.value });
+        }
+
+        // Content-Length if body present
+        if (self.body) |body| {
+            try request.writer().print("Content-Length: {d}\r\n", .{body.len});
+        }
+
+        // End headers
+        try request.appendSlice("\r\n");
+
+        // Body
+        if (self.body) |body| {
+            try request.appendSlice(body);
+        }
+
+        return request.toOwnedSlice();
+    }
+};
+
+// =============================================================================
+// AWS SigV4 Request Signing
+// =============================================================================
+
+/// AWS Signature Version 4 signing for Secrets Manager
+pub const AwsSigV4Signer = struct {
+    allocator: std.mem.Allocator,
+    config: AwsConfig,
+    service: []const u8 = "secretsmanager",
+
+    pub fn init(allocator: std.mem.Allocator, config: AwsConfig) AwsSigV4Signer {
+        return .{
+            .allocator = allocator,
+            .config = config,
+        };
+    }
+
+    /// Build GetSecretValue request
+    pub fn buildGetSecretValueRequest(self: *AwsSigV4Signer, secret_id: []const u8) !AwsRequest {
+        const host = if (self.config.endpoint) |ep|
+            ep
+        else
+            try std.fmt.allocPrint(self.allocator, "secretsmanager.{s}.amazonaws.com", .{self.config.region});
+
+        const body = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"SecretId\":\"{s}\"}}",
+            .{secret_id},
+        );
+
+        // Get current timestamp
+        const timestamp = time_compat.timestamp();
+        const date_stamp = try self.formatDateStamp(timestamp);
+        const amz_date = try self.formatAmzDate(timestamp);
+
+        var headers = std.ArrayList(Header).init(self.allocator);
+        try headers.append(.{ .name = "Host", .value = host });
+        try headers.append(.{ .name = "X-Amz-Date", .value = amz_date });
+        try headers.append(.{ .name = "X-Amz-Target", .value = "secretsmanager.GetSecretValue" });
+        try headers.append(.{ .name = "Content-Type", .value = "application/x-amz-json-1.1" });
+
+        // Add session token if present
+        if (self.config.session_token) |token| {
+            try headers.append(.{ .name = "X-Amz-Security-Token", .value = token });
+        }
+
+        return AwsRequest{
+            .method = "POST",
+            .path = "/",
+            .host = host,
+            .headers = try headers.toOwnedSlice(),
+            .body = body,
+            .date_stamp = date_stamp,
+            .amz_date = amz_date,
+            .allocator = self.allocator,
+        };
+    }
+
+    /// Calculate the signing key
+    /// kSecret = "AWS4" + SecretAccessKey
+    /// kDate = HMAC-SHA256(kSecret, DateStamp)
+    /// kRegion = HMAC-SHA256(kDate, Region)
+    /// kService = HMAC-SHA256(kRegion, Service)
+    /// kSigning = HMAC-SHA256(kService, "aws4_request")
+    pub fn deriveSigningKey(self: *AwsSigV4Signer, date_stamp: []const u8) ![32]u8 {
+        const secret_key = self.config.secret_access_key orelse return error.NoCredentials;
+
+        // kSecret = "AWS4" + secret_key
+        var k_secret = try self.allocator.alloc(u8, 4 + secret_key.len);
+        defer self.allocator.free(k_secret);
+        @memcpy(k_secret[0..4], "AWS4");
+        @memcpy(k_secret[4..], secret_key);
+
+        // kDate = HMAC-SHA256(kSecret, date_stamp)
+        var k_date: [32]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&k_date, date_stamp, k_secret);
+
+        // kRegion = HMAC-SHA256(kDate, region)
+        var k_region: [32]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&k_region, self.config.region, &k_date);
+
+        // kService = HMAC-SHA256(kRegion, service)
+        var k_service: [32]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&k_service, self.service, &k_region);
+
+        // kSigning = HMAC-SHA256(kService, "aws4_request")
+        var k_signing: [32]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&k_signing, "aws4_request", &k_service);
+
+        return k_signing;
+    }
+
+    /// Create canonical request hash
+    /// CanonicalRequest = Method + '\n' + Path + '\n' + Query + '\n' +
+    ///                    CanonicalHeaders + '\n' + SignedHeaders + '\n' +
+    ///                    HashedPayload
+    pub fn hashCanonicalRequest(
+        self: *AwsSigV4Signer,
+        method: []const u8,
+        path: []const u8,
+        headers: []const Header,
+        payload: []const u8,
+    ) ![64]u8 {
+        _ = self;
+
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+        // Method
+        hasher.update(method);
+        hasher.update("\n");
+
+        // Path
+        hasher.update(path);
+        hasher.update("\n");
+
+        // Query string (empty for POST)
+        hasher.update("\n");
+
+        // Canonical headers (must be sorted, lowercase)
+        for (headers) |header| {
+            hasher.update(header.name);
+            hasher.update(":");
+            hasher.update(header.value);
+            hasher.update("\n");
+        }
+        hasher.update("\n");
+
+        // Signed headers
+        for (headers, 0..) |header, i| {
+            if (i > 0) hasher.update(";");
+            hasher.update(header.name);
+        }
+        hasher.update("\n");
+
+        // Hashed payload
+        var payload_hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(payload, &payload_hash, .{});
+        var hex_payload: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_payload, "{s}", .{std.fmt.fmtSliceHexLower(&payload_hash)}) catch unreachable;
+        hasher.update(&hex_payload);
+
+        var result: [32]u8 = undefined;
+        hasher.final(&result);
+
+        var hex_result: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_result, "{s}", .{std.fmt.fmtSliceHexLower(&result)}) catch unreachable;
+        return hex_result;
+    }
+
+    fn formatDateStamp(self: *AwsSigV4Signer, timestamp: i64) ![]const u8 {
+        // Format: YYYYMMDD
+        const epoch_seconds: u64 = @intCast(timestamp);
+        const epoch_days = epoch_seconds / 86400;
+        const year_day = std.time.epoch.EpochDay{ .day = epoch_days };
+        const year_and_day = year_day.calculateYearDay();
+        const month_day = year_and_day.calculateMonthDay();
+
+        return try std.fmt.allocPrint(self.allocator, "{d:0>4}{d:0>2}{d:0>2}", .{
+            year_and_day.year,
+            @intFromEnum(month_day.month),
+            month_day.day_index + 1,
+        });
+    }
+
+    fn formatAmzDate(self: *AwsSigV4Signer, timestamp: i64) ![]const u8 {
+        // Format: YYYYMMDD'T'HHMMSS'Z'
+        const epoch_seconds: u64 = @intCast(timestamp);
+        const epoch_days = epoch_seconds / 86400;
+        const day_seconds = epoch_seconds % 86400;
+        const year_day = std.time.epoch.EpochDay{ .day = epoch_days };
+        const year_and_day = year_day.calculateYearDay();
+        const month_day = year_and_day.calculateMonthDay();
+
+        const hours = day_seconds / 3600;
+        const minutes = (day_seconds % 3600) / 60;
+        const seconds = day_seconds % 60;
+
+        return try std.fmt.allocPrint(self.allocator, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
+            year_and_day.year,
+            @intFromEnum(month_day.month),
+            month_day.day_index + 1,
+            hours,
+            minutes,
+            seconds,
+        });
+    }
+};
+
+pub const AwsRequest = struct {
+    method: []const u8,
+    path: []const u8,
+    host: []const u8,
+    headers: []Header,
+    body: []const u8,
+    date_stamp: []const u8,
+    amz_date: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *AwsRequest) void {
+        self.allocator.free(self.host);
+        self.allocator.free(self.body);
+        self.allocator.free(self.headers);
+        self.allocator.free(self.date_stamp);
+        self.allocator.free(self.amz_date);
     }
 };
 
