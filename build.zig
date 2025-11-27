@@ -160,6 +160,28 @@ pub fn build(b: *std.Build) void {
     migrate_cli.linkSystemLibrary("sqlite3");
     b.installArtifact(migrate_cli);
 
+    // Benchmark CLI tool
+    const benchmark_cli_module = b.createModule(.{
+        .root_source_file = b.path("src/benchmark_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const benchmark_cli = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = benchmark_cli_module,
+    });
+    b.installArtifact(benchmark_cli);
+
+    // Benchmark run step
+    const bench_cmd = b.addRunArtifact(benchmark_cli);
+    bench_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        bench_cmd.addArgs(args);
+    }
+    const bench_step = b.step("bench", "Run performance benchmarks");
+    bench_step.dependOn(&bench_cmd.step);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 

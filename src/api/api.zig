@@ -1,5 +1,6 @@
 const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
+const version_info = @import("../core/version.zig");
 const database = @import("../storage/database.zig");
 const auth_mod = @import("../auth/auth.zig");
 const csrf_mod = @import("../auth/csrf.zig");
@@ -380,9 +381,10 @@ pub const APIServer = struct {
 
         const json = try std.fmt.allocPrint(
             self.allocator,
-            \\{{"server":{{"status":"running","version":"v0.25.0"}},"queue":{{"total":{d},"pending":{d},"processing":{d},"retry":{d}}},"users":{{"total":{d}}}}}
+            \\{{"server":{{"status":"running","version":"{s}"}},"queue":{{"total":{d},"pending":{d},"processing":{d},"retry":{d}}},"users":{{"total":{d}}}}}
         ,
             .{
+                version_info.version_display,
                 queue_stats.total,
                 queue_stats.pending,
                 queue_stats.processing,

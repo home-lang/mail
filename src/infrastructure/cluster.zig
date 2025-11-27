@@ -1,5 +1,6 @@
 const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
+const version_info = @import("../core/version.zig");
 const raft = @import("raft.zig");
 
 // =============================================================================
@@ -281,7 +282,7 @@ pub const ClusterManager = struct {
             .status = std.atomic.Value(NodeStatus).init(.healthy),
             .last_heartbeat = std.atomic.Value(i64).init(time_compat.timestamp()),
             .metadata = .{
-                .version = try allocator.dupe(u8, "v0.26.0"),
+                .version = try allocator.dupe(u8, version_info.version_display),
                 .uptime_seconds = 0,
                 .active_connections = 0,
                 .messages_processed = 0,

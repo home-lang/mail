@@ -1,5 +1,10 @@
 # SMTP Server in Zig
 
+[![CI](https://github.com/yourusername/mail/workflows/CI/badge.svg)](https://github.com/yourusername/mail/actions)
+[![codecov](https://codecov.io/gh/yourusername/mail/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/mail)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Zig](https://img.shields.io/badge/Zig-0.15.1-orange.svg)](https://ziglang.org/)
+
 A performant and secure SMTP server implementation written in Zig, designed for self-hosting email infrastructure.
 
 ## Features

@@ -83,3 +83,83 @@ jobs:
 
     - name: Static analysis (future)
       run: echo "Static analysis placeholder"
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.15.1
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsqlite3-dev kcov
+
+    - name: Build with debug info
+      run: zig build -Doptimize=Debug
+
+    - name: Run tests with coverage
+      run: |
+        mkdir -p coverage
+        kcov --include-pattern=src/ coverage/ zig build test 2>/dev/null || true
+
+    - name: Generate coverage report
+      run: |
+        if [ -d "coverage" ]; then
+          echo "Coverage report generated"
+          ls -la coverage/
+        fi
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        directory: ./coverage
+        fail_ci_if_error: false
+        verbose: true
+
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.15.1
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsqlite3-dev
+
+    - name: Build release
+      run: zig build -Doptimize=ReleaseFast
+
+    - name: Run benchmarks
+      run: |
+        if [ -f "zig-out/bin/benchmark" ]; then
+          ./zig-out/bin/benchmark --json > benchmark-results.json
+        else
+          echo '{"note": "benchmark binary not found"}' > benchmark-results.json
+        fi
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: benchmark-results.json

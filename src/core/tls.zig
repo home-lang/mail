@@ -835,3 +835,1012 @@ test "session cache" {
     // Non-existent session
     try testing.expect(cache.get("session-nonexistent") == null);
 }
+
+// =============================================================================
+// TLS Cipher Suite Negotiation
+// =============================================================================
+
+/// Named groups (curves) for key exchange - RFC 8446
+pub const NamedGroup = enum(u16) {
+    // Elliptic Curve Groups (ECDHE)
+    secp256r1 = 0x0017,
+    secp384r1 = 0x0018,
+    secp521r1 = 0x0019,
+    x25519 = 0x001D,
+    x448 = 0x001E,
+
+    // Finite Field Groups (DHE)
+    ffdhe2048 = 0x0100,
+    ffdhe3072 = 0x0101,
+    ffdhe4096 = 0x0102,
+    ffdhe6144 = 0x0103,
+    ffdhe8192 = 0x0104,
+
+    pub fn toString(self: NamedGroup) []const u8 {
+        return switch (self) {
+            .secp256r1 => "secp256r1",
+            .secp384r1 => "secp384r1",
+            .secp521r1 => "secp521r1",
+            .x25519 => "x25519",
+            .x448 => "x448",
+            .ffdhe2048 => "ffdhe2048",
+            .ffdhe3072 => "ffdhe3072",
+            .ffdhe4096 => "ffdhe4096",
+            .ffdhe6144 => "ffdhe6144",
+            .ffdhe8192 => "ffdhe8192",
+        };
+    }
+
+    pub fn getKeySize(self: NamedGroup) u16 {
+        return switch (self) {
+            .secp256r1, .x25519 => 256,
+            .secp384r1 => 384,
+            .secp521r1, .x448 => 521,
+            .ffdhe2048 => 2048,
+            .ffdhe3072 => 3072,
+            .ffdhe4096 => 4096,
+            .ffdhe6144 => 6144,
+            .ffdhe8192 => 8192,
+        };
+    }
+
+    pub fn isEllipticCurve(self: NamedGroup) bool {
+        return switch (self) {
+            .secp256r1, .secp384r1, .secp521r1, .x25519, .x448 => true,
+            else => false,
+        };
+    }
+};
+
+/// Signature algorithms for certificate verification - RFC 8446
+pub const SignatureScheme = enum(u16) {
+    // RSA PKCS#1 v1.5
+    rsa_pkcs1_sha256 = 0x0401,
+    rsa_pkcs1_sha384 = 0x0501,
+    rsa_pkcs1_sha512 = 0x0601,
+
+    // ECDSA
+    ecdsa_secp256r1_sha256 = 0x0403,
+    ecdsa_secp384r1_sha384 = 0x0503,
+    ecdsa_secp521r1_sha512 = 0x0603,
+
+    // RSA-PSS with public key OID rsaEncryption
+    rsa_pss_rsae_sha256 = 0x0804,
+    rsa_pss_rsae_sha384 = 0x0805,
+    rsa_pss_rsae_sha512 = 0x0806,
+
+    // EdDSA
+    ed25519 = 0x0807,
+    ed448 = 0x0808,
+
+    // RSA-PSS with public key OID RSASSA-PSS
+    rsa_pss_pss_sha256 = 0x0809,
+    rsa_pss_pss_sha384 = 0x080a,
+    rsa_pss_pss_sha512 = 0x080b,
+
+    pub fn toString(self: SignatureScheme) []const u8 {
+        return switch (self) {
+            .rsa_pkcs1_sha256 => "rsa_pkcs1_sha256",
+            .rsa_pkcs1_sha384 => "rsa_pkcs1_sha384",
+            .rsa_pkcs1_sha512 => "rsa_pkcs1_sha512",
+            .ecdsa_secp256r1_sha256 => "ecdsa_secp256r1_sha256",
+            .ecdsa_secp384r1_sha384 => "ecdsa_secp384r1_sha384",
+            .ecdsa_secp521r1_sha512 => "ecdsa_secp521r1_sha512",
+            .rsa_pss_rsae_sha256 => "rsa_pss_rsae_sha256",
+            .rsa_pss_rsae_sha384 => "rsa_pss_rsae_sha384",
+            .rsa_pss_rsae_sha512 => "rsa_pss_rsae_sha512",
+            .ed25519 => "ed25519",
+            .ed448 => "ed448",
+            .rsa_pss_pss_sha256 => "rsa_pss_pss_sha256",
+            .rsa_pss_pss_sha384 => "rsa_pss_pss_sha384",
+            .rsa_pss_pss_sha512 => "rsa_pss_pss_sha512",
+        };
+    }
+
+    pub fn isTls13Only(self: SignatureScheme) bool {
+        return switch (self) {
+            .rsa_pss_rsae_sha256,
+            .rsa_pss_rsae_sha384,
+            .rsa_pss_rsae_sha512,
+            .ed25519,
+            .ed448,
+            .rsa_pss_pss_sha256,
+            .rsa_pss_pss_sha384,
+            .rsa_pss_pss_sha512,
+            => true,
+            else => false,
+        };
+    }
+};
+
+/// TLS extension types - RFC 8446
+pub const ExtensionType = enum(u16) {
+    server_name = 0,
+    max_fragment_length = 1,
+    status_request = 5,
+    supported_groups = 10,
+    signature_algorithms = 13,
+    use_srtp = 14,
+    heartbeat = 15,
+    application_layer_protocol_negotiation = 16,
+    signed_certificate_timestamp = 18,
+    client_certificate_type = 19,
+    server_certificate_type = 20,
+    padding = 21,
+    pre_shared_key = 41,
+    early_data = 42,
+    supported_versions = 43,
+    cookie = 44,
+    psk_key_exchange_modes = 45,
+    certificate_authorities = 47,
+    oid_filters = 48,
+    post_handshake_auth = 49,
+    signature_algorithms_cert = 50,
+    key_share = 51,
+
+    pub fn toString(self: ExtensionType) []const u8 {
+        return switch (self) {
+            .server_name => "server_name",
+            .max_fragment_length => "max_fragment_length",
+            .status_request => "status_request",
+            .supported_groups => "supported_groups",
+            .signature_algorithms => "signature_algorithms",
+            .use_srtp => "use_srtp",
+            .heartbeat => "heartbeat",
+            .application_layer_protocol_negotiation => "alpn",
+            .signed_certificate_timestamp => "sct",
+            .client_certificate_type => "client_certificate_type",
+            .server_certificate_type => "server_certificate_type",
+            .padding => "padding",
+            .pre_shared_key => "pre_shared_key",
+            .early_data => "early_data",
+            .supported_versions => "supported_versions",
+            .cookie => "cookie",
+            .psk_key_exchange_modes => "psk_key_exchange_modes",
+            .certificate_authorities => "certificate_authorities",
+            .oid_filters => "oid_filters",
+            .post_handshake_auth => "post_handshake_auth",
+            .signature_algorithms_cert => "signature_algorithms_cert",
+            .key_share => "key_share",
+        };
+    }
+};
+
+/// Cipher suite negotiator for selecting best cipher suite
+pub const CipherNegotiator = struct {
+    allocator: std.mem.Allocator,
+    server_config: NegotiationConfig,
+
+    pub const NegotiationConfig = struct {
+        // Server's preferred cipher suites (in order of preference)
+        cipher_suites: []const CipherSuite = &[_]CipherSuite{
+            .TLS_AES_256_GCM_SHA384,
+            .TLS_CHACHA20_POLY1305_SHA256,
+            .TLS_AES_128_GCM_SHA256,
+            .TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            .TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            .TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            .TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        },
+
+        // Server's preferred named groups
+        named_groups: []const NamedGroup = &[_]NamedGroup{
+            .x25519,
+            .secp256r1,
+            .secp384r1,
+            .x448,
+        },
+
+        // Server's preferred signature algorithms
+        signature_algorithms: []const SignatureScheme = &[_]SignatureScheme{
+            .ecdsa_secp256r1_sha256,
+            .ecdsa_secp384r1_sha384,
+            .rsa_pss_rsae_sha256,
+            .rsa_pss_rsae_sha384,
+            .rsa_pkcs1_sha256,
+            .rsa_pkcs1_sha384,
+            .ed25519,
+        },
+
+        // TLS version constraints
+        min_version: TlsVersion = .tls_1_2,
+        max_version: TlsVersion = .tls_1_3,
+
+        // Prefer server cipher order
+        server_preference: bool = true,
+
+        // Require perfect forward secrecy
+        require_pfs: bool = true,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, config: NegotiationConfig) CipherNegotiator {
+        return .{
+            .allocator = allocator,
+            .server_config = config,
+        };
+    }
+
+    /// Negotiate cipher suite from client hello
+    pub fn negotiateCipherSuite(
+        self: *CipherNegotiator,
+        client_suites: []const u16,
+    ) ?CipherSuite {
+        if (self.server_config.server_preference) {
+            // Server preference: iterate server's list first
+            for (self.server_config.cipher_suites) |server_suite| {
+                for (client_suites) |client_suite| {
+                    if (@intFromEnum(server_suite) == client_suite) {
+                        return server_suite;
+                    }
+                }
+            }
+        } else {
+            // Client preference: iterate client's list first
+            for (client_suites) |client_suite| {
+                for (self.server_config.cipher_suites) |server_suite| {
+                    if (@intFromEnum(server_suite) == client_suite) {
+                        return server_suite;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Negotiate named group for key exchange
+    pub fn negotiateNamedGroup(
+        self: *CipherNegotiator,
+        client_groups: []const u16,
+    ) ?NamedGroup {
+        for (self.server_config.named_groups) |server_group| {
+            for (client_groups) |client_group| {
+                if (@intFromEnum(server_group) == client_group) {
+                    return server_group;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Negotiate signature algorithm
+    pub fn negotiateSignatureAlgorithm(
+        self: *CipherNegotiator,
+        client_schemes: []const u16,
+        tls_version: TlsVersion,
+    ) ?SignatureScheme {
+        for (self.server_config.signature_algorithms) |server_scheme| {
+            // Skip TLS 1.3-only schemes for TLS 1.2
+            if (tls_version == .tls_1_2 and server_scheme.isTls13Only()) {
+                continue;
+            }
+
+            for (client_schemes) |client_scheme| {
+                if (@intFromEnum(server_scheme) == client_scheme) {
+                    return server_scheme;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Negotiate TLS version
+    pub fn negotiateVersion(
+        self: *CipherNegotiator,
+        client_versions: []const u16,
+    ) ?TlsVersion {
+        // TLS 1.3 = 0x0304, TLS 1.2 = 0x0303
+        const tls_1_3: u16 = 0x0304;
+        const tls_1_2: u16 = 0x0303;
+
+        // Check if client supports TLS 1.3 and we allow it
+        if (self.server_config.max_version == .tls_1_3) {
+            for (client_versions) |ver| {
+                if (ver == tls_1_3) return .tls_1_3;
+            }
+        }
+
+        // Check if client supports TLS 1.2 and we allow it
+        if (self.server_config.min_version == .tls_1_2 or
+            self.server_config.max_version == .tls_1_2)
+        {
+            for (client_versions) |ver| {
+                if (ver == tls_1_2) return .tls_1_2;
+            }
+        }
+
+        return null;
+    }
+
+    /// Full negotiation result
+    pub fn negotiate(
+        self: *CipherNegotiator,
+        client_hello: *const ClientHelloParams,
+    ) NegotiationResult {
+        const version = self.negotiateVersion(client_hello.supported_versions) orelse {
+            return .{ .success = false, .error_reason = .version_mismatch };
+        };
+
+        const cipher_suite = self.negotiateCipherSuite(client_hello.cipher_suites) orelse {
+            return .{ .success = false, .error_reason = .cipher_mismatch };
+        };
+
+        const named_group = self.negotiateNamedGroup(client_hello.named_groups) orelse {
+            return .{ .success = false, .error_reason = .no_common_group };
+        };
+
+        const signature_scheme = self.negotiateSignatureAlgorithm(
+            client_hello.signature_algorithms,
+            version,
+        ) orelse {
+            return .{ .success = false, .error_reason = .no_common_signature };
+        };
+
+        return .{
+            .success = true,
+            .error_reason = null,
+            .version = version,
+            .cipher_suite = cipher_suite,
+            .named_group = named_group,
+            .signature_scheme = signature_scheme,
+            .server_name = client_hello.server_name,
+            .alpn_protocol = self.negotiateAlpn(client_hello.alpn_protocols),
+        };
+    }
+
+    fn negotiateAlpn(self: *CipherNegotiator, client_protocols: []const []const u8) ?[]const u8 {
+        _ = self;
+        // For SMTP, we typically use "smtp" or don't use ALPN
+        for (client_protocols) |proto| {
+            if (std.mem.eql(u8, proto, "smtp") or
+                std.mem.eql(u8, proto, "submission"))
+            {
+                return proto;
+            }
+        }
+        return null;
+    }
+
+    pub const NegotiationResult = struct {
+        success: bool,
+        error_reason: ?NegotiationError = null,
+        version: ?TlsVersion = null,
+        cipher_suite: ?CipherSuite = null,
+        named_group: ?NamedGroup = null,
+        signature_scheme: ?SignatureScheme = null,
+        server_name: ?[]const u8 = null,
+        alpn_protocol: ?[]const u8 = null,
+
+        pub fn toJson(self: *const NegotiationResult, allocator: std.mem.Allocator) ![]u8 {
+            if (!self.success) {
+                return std.fmt.allocPrint(allocator,
+                    \\{{"success": false, "error": "{s}"}}
+                , .{if (self.error_reason) |e| e.toString() else "unknown"});
+            }
+
+            return std.fmt.allocPrint(allocator,
+                \\{{
+                \\  "success": true,
+                \\  "version": "{s}",
+                \\  "cipher_suite": "{s}",
+                \\  "named_group": "{s}",
+                \\  "signature_scheme": "{s}"
+                \\}}
+            , .{
+                if (self.version) |v| v.toString() else "none",
+                if (self.cipher_suite) |c| c.toString() else "none",
+                if (self.named_group) |g| g.toString() else "none",
+                if (self.signature_scheme) |s| s.toString() else "none",
+            });
+        }
+    };
+
+    pub const NegotiationError = enum {
+        version_mismatch,
+        cipher_mismatch,
+        no_common_group,
+        no_common_signature,
+        invalid_extension,
+        missing_extension,
+
+        pub fn toString(self: NegotiationError) []const u8 {
+            return switch (self) {
+                .version_mismatch => "no_common_tls_version",
+                .cipher_mismatch => "no_common_cipher_suite",
+                .no_common_group => "no_common_named_group",
+                .no_common_signature => "no_common_signature_algorithm",
+                .invalid_extension => "invalid_tls_extension",
+                .missing_extension => "missing_required_extension",
+            };
+        }
+    };
+};
+
+/// Parsed ClientHello parameters for negotiation
+pub const ClientHelloParams = struct {
+    // Legacy version field (usually 0x0303 for TLS 1.2 compatibility)
+    legacy_version: u16 = 0x0303,
+
+    // Random bytes (32 bytes)
+    random: [32]u8 = [_]u8{0} ** 32,
+
+    // Session ID (for resumption)
+    session_id: []const u8 = &[_]u8{},
+
+    // Offered cipher suites
+    cipher_suites: []const u16 = &[_]u16{},
+
+    // Compression methods (should be [0] for TLS 1.3)
+    compression_methods: []const u8 = &[_]u8{0},
+
+    // Extensions
+    supported_versions: []const u16 = &[_]u16{},
+    named_groups: []const u16 = &[_]u16{},
+    signature_algorithms: []const u16 = &[_]u16{},
+    server_name: ?[]const u8 = null,
+    alpn_protocols: []const []const u8 = &[_][]const u8{},
+    key_shares: []const KeyShare = &[_]KeyShare{},
+
+    pub const KeyShare = struct {
+        group: u16,
+        key_exchange: []const u8,
+    };
+};
+
+/// ServerHello builder
+pub const ServerHelloBuilder = struct {
+    allocator: std.mem.Allocator,
+    version: TlsVersion,
+    cipher_suite: CipherSuite,
+    session_id: []const u8,
+    extensions: std.ArrayList(Extension),
+
+    pub const Extension = struct {
+        ext_type: ExtensionType,
+        data: []const u8,
+    };
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        version: TlsVersion,
+        cipher_suite: CipherSuite,
+        session_id: []const u8,
+    ) ServerHelloBuilder {
+        return .{
+            .allocator = allocator,
+            .version = version,
+            .cipher_suite = cipher_suite,
+            .session_id = session_id,
+            .extensions = std.ArrayList(Extension).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *ServerHelloBuilder) void {
+        self.extensions.deinit();
+    }
+
+    pub fn addExtension(self: *ServerHelloBuilder, ext_type: ExtensionType, data: []const u8) !void {
+        try self.extensions.append(.{
+            .ext_type = ext_type,
+            .data = data,
+        });
+    }
+
+    pub fn addSupportedVersions(self: *ServerHelloBuilder) !void {
+        // TLS 1.3 = 0x0304
+        var data: [2]u8 = undefined;
+        std.mem.writeInt(u16, &data, 0x0304, .big);
+        try self.addExtension(.supported_versions, &data);
+    }
+
+    pub fn addKeyShare(self: *ServerHelloBuilder, group: NamedGroup, key_exchange: []const u8) !void {
+        var data = std.ArrayList(u8).init(self.allocator);
+        defer data.deinit();
+
+        // Named group (2 bytes)
+        var group_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &group_bytes, @intFromEnum(group), .big);
+        try data.appendSlice(&group_bytes);
+
+        // Key exchange length (2 bytes)
+        var len_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &len_bytes, @intCast(key_exchange.len), .big);
+        try data.appendSlice(&len_bytes);
+
+        // Key exchange data
+        try data.appendSlice(key_exchange);
+
+        try self.addExtension(.key_share, try data.toOwnedSlice());
+    }
+
+    /// Build the ServerHello message
+    pub fn build(self: *ServerHelloBuilder) ![]u8 {
+        var output = std.ArrayList(u8).init(self.allocator);
+        errdefer output.deinit();
+
+        // Legacy version (TLS 1.2 = 0x0303)
+        var version_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &version_bytes, 0x0303, .big);
+        try output.appendSlice(&version_bytes);
+
+        // Server random (32 bytes)
+        var random: [32]u8 = undefined;
+        std.crypto.random.bytes(&random);
+        try output.appendSlice(&random);
+
+        // Session ID length and data
+        try output.append(@intCast(self.session_id.len));
+        try output.appendSlice(self.session_id);
+
+        // Cipher suite (2 bytes)
+        var cipher_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &cipher_bytes, @intFromEnum(self.cipher_suite), .big);
+        try output.appendSlice(&cipher_bytes);
+
+        // Compression method (0 = null)
+        try output.append(0);
+
+        // Extensions length (2 bytes) - placeholder
+        const ext_len_pos = output.items.len;
+        try output.appendSlice(&[_]u8{ 0, 0 });
+
+        // Extensions
+        const ext_start = output.items.len;
+        for (self.extensions.items) |ext| {
+            // Extension type (2 bytes)
+            var ext_type_bytes: [2]u8 = undefined;
+            std.mem.writeInt(u16, &ext_type_bytes, @intFromEnum(ext.ext_type), .big);
+            try output.appendSlice(&ext_type_bytes);
+
+            // Extension data length (2 bytes)
+            var ext_len_bytes: [2]u8 = undefined;
+            std.mem.writeInt(u16, &ext_len_bytes, @intCast(ext.data.len), .big);
+            try output.appendSlice(&ext_len_bytes);
+
+            // Extension data
+            try output.appendSlice(ext.data);
+        }
+
+        // Update extensions length
+        const ext_len = output.items.len - ext_start;
+        std.mem.writeInt(u16, output.items[ext_len_pos..][0..2], @intCast(ext_len), .big);
+
+        return output.toOwnedSlice();
+    }
+};
+
+// =============================================================================
+// TLS Alert Codes (RFC 5246, RFC 8446)
+// =============================================================================
+
+/// TLS Alert Level
+pub const AlertLevel = enum(u8) {
+    warning = 1,
+    fatal = 2,
+};
+
+/// TLS Alert Description (for proper error signaling)
+pub const AlertDescription = enum(u8) {
+    close_notify = 0,
+    unexpected_message = 10,
+    bad_record_mac = 20,
+    decryption_failed = 21,
+    record_overflow = 22,
+    decompression_failure = 30,
+    handshake_failure = 40,
+    no_certificate = 41,
+    bad_certificate = 42,
+    unsupported_certificate = 43,
+    certificate_revoked = 44,
+    certificate_expired = 45,
+    certificate_unknown = 46,
+    illegal_parameter = 47,
+    unknown_ca = 48,
+    access_denied = 49,
+    decode_error = 50,
+    decrypt_error = 51,
+    export_restriction = 60,
+    protocol_version = 70,
+    insufficient_security = 71,
+    internal_error = 80,
+    inappropriate_fallback = 86,
+    user_canceled = 90,
+    no_renegotiation = 100,
+    missing_extension = 109,
+    unsupported_extension = 110,
+    certificate_unobtainable = 111,
+    unrecognized_name = 112,
+    bad_certificate_status_response = 113,
+    bad_certificate_hash_value = 114,
+    unknown_psk_identity = 115,
+    certificate_required = 116,
+    no_application_protocol = 120,
+
+    pub fn toString(self: AlertDescription) []const u8 {
+        return switch (self) {
+            .close_notify => "close_notify",
+            .unexpected_message => "unexpected_message",
+            .bad_record_mac => "bad_record_mac",
+            .handshake_failure => "handshake_failure",
+            .bad_certificate => "bad_certificate",
+            .certificate_expired => "certificate_expired",
+            .certificate_unknown => "certificate_unknown",
+            .illegal_parameter => "illegal_parameter",
+            .unknown_ca => "unknown_ca",
+            .decode_error => "decode_error",
+            .protocol_version => "protocol_version",
+            .insufficient_security => "insufficient_security",
+            .internal_error => "internal_error",
+            .inappropriate_fallback => "inappropriate_fallback",
+            .missing_extension => "missing_extension",
+            .unsupported_extension => "unsupported_extension",
+            .no_application_protocol => "no_application_protocol",
+            else => "unknown_alert",
+        };
+    }
+
+    pub fn isFatal(self: AlertDescription) bool {
+        return switch (self) {
+            .close_notify, .user_canceled, .no_renegotiation => false,
+            else => true,
+        };
+    }
+};
+
+/// TLS Alert message
+pub const TlsAlert = struct {
+    level: AlertLevel,
+    description: AlertDescription,
+
+    /// Build alert message bytes
+    pub fn build(self: TlsAlert) [7]u8 {
+        return .{
+            21, // Alert content type
+            0x03, 0x03, // Version (TLS 1.2 for compatibility)
+            0x00, 0x02, // Length
+            @intFromEnum(self.level),
+            @intFromEnum(self.description),
+        };
+    }
+
+    /// Create fatal alert
+    pub fn fatal(description: AlertDescription) TlsAlert {
+        return .{ .level = .fatal, .description = description };
+    }
+
+    /// Create warning alert
+    pub fn warning(description: AlertDescription) TlsAlert {
+        return .{ .level = .warning, .description = description };
+    }
+};
+
+/// Map negotiation error to TLS alert
+pub fn negotiationErrorToAlert(err: CipherNegotiator.NegotiationError) TlsAlert {
+    return switch (err) {
+        .version_mismatch => TlsAlert.fatal(.protocol_version),
+        .cipher_mismatch => TlsAlert.fatal(.handshake_failure),
+        .no_common_group => TlsAlert.fatal(.handshake_failure),
+        .no_common_signature => TlsAlert.fatal(.handshake_failure),
+        .invalid_extension => TlsAlert.fatal(.illegal_parameter),
+        .missing_extension => TlsAlert.fatal(.missing_extension),
+    };
+}
+
+// =============================================================================
+// ClientHello Parser (from raw bytes)
+// =============================================================================
+
+/// Parse ClientHello from raw TLS record
+pub const ClientHelloParser = struct {
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) ClientHelloParser {
+        return .{ .allocator = allocator };
+    }
+
+    pub const ParseError = error{
+        TooShort,
+        InvalidRecordType,
+        InvalidHandshakeType,
+        InvalidLength,
+        UnsupportedVersion,
+        OutOfMemory,
+    };
+
+    /// Parse ClientHello from raw bytes
+    pub fn parse(self: *ClientHelloParser, data: []const u8) ParseError!ClientHelloParams {
+        if (data.len < 5) return error.TooShort;
+
+        // Check record type (should be 22 = Handshake)
+        if (data[0] != 22) return error.InvalidRecordType;
+
+        // Skip record header (5 bytes)
+        const record_payload = data[5..];
+        if (record_payload.len < 4) return error.TooShort;
+
+        // Check handshake type (should be 1 = ClientHello)
+        if (record_payload[0] != 1) return error.InvalidHandshakeType;
+
+        // Parse handshake length (3 bytes)
+        const handshake_len = (@as(u32, record_payload[1]) << 16) |
+            (@as(u32, record_payload[2]) << 8) |
+            @as(u32, record_payload[3]);
+        _ = handshake_len;
+
+        var pos: usize = 4;
+        var result = ClientHelloParams{};
+
+        // Legacy version (2 bytes)
+        if (pos + 2 > record_payload.len) return error.TooShort;
+        result.legacy_version = std.mem.readInt(u16, record_payload[pos..][0..2], .big);
+        pos += 2;
+
+        // Random (32 bytes)
+        if (pos + 32 > record_payload.len) return error.TooShort;
+        @memcpy(&result.random, record_payload[pos..][0..32]);
+        pos += 32;
+
+        // Session ID length (1 byte) and data
+        if (pos + 1 > record_payload.len) return error.TooShort;
+        const session_id_len = record_payload[pos];
+        pos += 1;
+        if (pos + session_id_len > record_payload.len) return error.TooShort;
+        result.session_id = record_payload[pos..][0..session_id_len];
+        pos += session_id_len;
+
+        // Cipher suites length (2 bytes)
+        if (pos + 2 > record_payload.len) return error.TooShort;
+        const cipher_suites_len = std.mem.readInt(u16, record_payload[pos..][0..2], .big);
+        pos += 2;
+
+        // Parse cipher suites
+        if (pos + cipher_suites_len > record_payload.len) return error.TooShort;
+        const num_suites = cipher_suites_len / 2;
+        const suites = try self.allocator.alloc(u16, num_suites);
+        for (0..num_suites) |i| {
+            suites[i] = std.mem.readInt(u16, record_payload[pos + i * 2 ..][0..2], .big);
+        }
+        result.cipher_suites = suites;
+        pos += cipher_suites_len;
+
+        // Compression methods (skip for now)
+        if (pos + 1 > record_payload.len) return error.TooShort;
+        const compression_len = record_payload[pos];
+        pos += 1 + compression_len;
+
+        // Extensions
+        if (pos + 2 <= record_payload.len) {
+            const extensions_len = std.mem.readInt(u16, record_payload[pos..][0..2], .big);
+            pos += 2;
+
+            const extensions_end = pos + extensions_len;
+            while (pos + 4 <= extensions_end and pos + 4 <= record_payload.len) {
+                const ext_type = std.mem.readInt(u16, record_payload[pos..][0..2], .big);
+                const ext_len = std.mem.readInt(u16, record_payload[pos + 2 ..][0..2], .big);
+                pos += 4;
+
+                if (pos + ext_len > record_payload.len) break;
+
+                // Parse specific extensions
+                switch (ext_type) {
+                    0x0000 => { // server_name
+                        if (ext_len >= 5) {
+                            const name_len = std.mem.readInt(u16, record_payload[pos + 3 ..][0..2], .big);
+                            if (pos + 5 + name_len <= record_payload.len) {
+                                result.server_name = record_payload[pos + 5 ..][0..name_len];
+                            }
+                        }
+                    },
+                    0x002b => { // supported_versions
+                        if (ext_len >= 1) {
+                            const versions_len = record_payload[pos];
+                            const num_versions = versions_len / 2;
+                            const versions = try self.allocator.alloc(u16, num_versions);
+                            for (0..num_versions) |i| {
+                                versions[i] = std.mem.readInt(u16, record_payload[pos + 1 + i * 2 ..][0..2], .big);
+                            }
+                            result.supported_versions = versions;
+                        }
+                    },
+                    0x000a => { // supported_groups
+                        if (ext_len >= 2) {
+                            const groups_len = std.mem.readInt(u16, record_payload[pos..][0..2], .big);
+                            const num_groups = groups_len / 2;
+                            const groups = try self.allocator.alloc(u16, num_groups);
+                            for (0..num_groups) |i| {
+                                groups[i] = std.mem.readInt(u16, record_payload[pos + 2 + i * 2 ..][0..2], .big);
+                            }
+                            result.named_groups = groups;
+                        }
+                    },
+                    0x000d => { // signature_algorithms
+                        if (ext_len >= 2) {
+                            const sig_len = std.mem.readInt(u16, record_payload[pos..][0..2], .big);
+                            const num_sigs = sig_len / 2;
+                            const sigs = try self.allocator.alloc(u16, num_sigs);
+                            for (0..num_sigs) |i| {
+                                sigs[i] = std.mem.readInt(u16, record_payload[pos + 2 + i * 2 ..][0..2], .big);
+                            }
+                            result.signature_algorithms = sigs;
+                        }
+                    },
+                    else => {},
+                }
+
+                pos += ext_len;
+            }
+        }
+
+        return result;
+    }
+};
+
+/// Detect TLS version downgrade attack
+pub fn detectVersionDowngrade(server_random: [32]u8, negotiated_version: TlsVersion) bool {
+    // RFC 8446 Section 4.1.3: Downgrade protection
+    // Last 8 bytes of ServerHello.random contain special values if downgrade
+    const downgrade_tls12: [8]u8 = .{ 0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01 };
+    const downgrade_tls11: [8]u8 = .{ 0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x00 };
+
+    const last8 = server_random[24..32];
+
+    return switch (negotiated_version) {
+        .tls_1_2 => std.mem.eql(u8, last8, &downgrade_tls12),
+        else => std.mem.eql(u8, last8, &downgrade_tls11),
+    };
+}
+
+/// Check if a cipher suite provides perfect forward secrecy
+pub fn hasPerfectForwardSecrecy(cipher: CipherSuite) bool {
+    return switch (cipher) {
+        // All ECDHE ciphers provide PFS
+        .TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        .TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        .TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        .TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        // TLS 1.3 ciphers always use ephemeral key exchange
+        .TLS_AES_128_GCM_SHA256,
+        .TLS_AES_256_GCM_SHA384,
+        .TLS_CHACHA20_POLY1305_SHA256,
+        => true,
+    };
+}
+
+/// Get cipher suite security level (bits)
+pub fn getCipherSecurityLevel(cipher: CipherSuite) u16 {
+    return switch (cipher) {
+        .TLS_AES_256_GCM_SHA384,
+        .TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        .TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        => 256,
+        .TLS_CHACHA20_POLY1305_SHA256,
+        .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        => 256,
+        .TLS_AES_128_GCM_SHA256,
+        .TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        .TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        => 128,
+    };
+}
+
+// =============================================================================
+// Additional TLS Tests
+// =============================================================================
+
+test "tls alert construction" {
+    const alert = TlsAlert.fatal(.handshake_failure);
+    const bytes = alert.build();
+    try std.testing.expectEqual(@as(u8, 21), bytes[0]); // Alert type
+    try std.testing.expectEqual(@as(u8, 2), bytes[5]); // Fatal level
+    try std.testing.expectEqual(@as(u8, 40), bytes[6]); // Handshake failure
+}
+
+test "cipher suite security properties" {
+    try std.testing.expect(hasPerfectForwardSecrecy(.TLS_AES_256_GCM_SHA384));
+    try std.testing.expect(hasPerfectForwardSecrecy(.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256));
+    try std.testing.expectEqual(@as(u16, 256), getCipherSecurityLevel(.TLS_AES_256_GCM_SHA384));
+    try std.testing.expectEqual(@as(u16, 128), getCipherSecurityLevel(.TLS_AES_128_GCM_SHA256));
+}
+
+test "cipher negotiation server preference" {
+    const testing = std.testing;
+
+    var negotiator = CipherNegotiator.init(testing.allocator, .{});
+
+    // Client offers TLS 1.2 ciphers first, then TLS 1.3
+    const client_suites = [_]u16{
+        @intFromEnum(CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256),
+        @intFromEnum(CipherSuite.TLS_AES_128_GCM_SHA256),
+        @intFromEnum(CipherSuite.TLS_AES_256_GCM_SHA384),
+    };
+
+    // Server prefers TLS_AES_256_GCM_SHA384 (first in server list)
+    const result = negotiator.negotiateCipherSuite(&client_suites);
+    try testing.expect(result != null);
+    try testing.expectEqual(CipherSuite.TLS_AES_256_GCM_SHA384, result.?);
+}
+
+test "version negotiation" {
+    const testing = std.testing;
+
+    var negotiator = CipherNegotiator.init(testing.allocator, .{
+        .min_version = .tls_1_2,
+        .max_version = .tls_1_3,
+    });
+
+    // Client supports both versions
+    const client_versions = [_]u16{ 0x0304, 0x0303 }; // TLS 1.3, TLS 1.2
+    const result = negotiator.negotiateVersion(&client_versions);
+    try testing.expect(result != null);
+    try testing.expectEqual(TlsVersion.tls_1_3, result.?);
+
+    // Client only supports TLS 1.2
+    const client_1_2_only = [_]u16{0x0303};
+    const result_1_2 = negotiator.negotiateVersion(&client_1_2_only);
+    try testing.expect(result_1_2 != null);
+    try testing.expectEqual(TlsVersion.tls_1_2, result_1_2.?);
+}
+
+test "named group negotiation" {
+    const testing = std.testing;
+
+    var negotiator = CipherNegotiator.init(testing.allocator, .{});
+
+    const client_groups = [_]u16{
+        @intFromEnum(NamedGroup.secp256r1),
+        @intFromEnum(NamedGroup.x25519),
+    };
+
+    // Server prefers x25519
+    const result = negotiator.negotiateNamedGroup(&client_groups);
+    try testing.expect(result != null);
+    try testing.expectEqual(NamedGroup.x25519, result.?);
+}
+
+test "full negotiation" {
+    const testing = std.testing;
+
+    var negotiator = CipherNegotiator.init(testing.allocator, .{});
+
+    const client_hello = ClientHelloParams{
+        .cipher_suites = &[_]u16{
+            @intFromEnum(CipherSuite.TLS_AES_128_GCM_SHA256),
+            @intFromEnum(CipherSuite.TLS_AES_256_GCM_SHA384),
+        },
+        .supported_versions = &[_]u16{ 0x0304, 0x0303 },
+        .named_groups = &[_]u16{
+            @intFromEnum(NamedGroup.x25519),
+            @intFromEnum(NamedGroup.secp256r1),
+        },
+        .signature_algorithms = &[_]u16{
+            @intFromEnum(SignatureScheme.ecdsa_secp256r1_sha256),
+            @intFromEnum(SignatureScheme.rsa_pss_rsae_sha256),
+        },
+        .server_name = "mail.example.com",
+    };
+
+    const result = negotiator.negotiate(&client_hello);
+    try testing.expect(result.success);
+    try testing.expectEqual(TlsVersion.tls_1_3, result.version.?);
+    try testing.expectEqual(NamedGroup.x25519, result.named_group.?);
+}
+
+test "negotiation result json" {
+    const testing = std.testing;
+
+    const result = CipherNegotiator.NegotiationResult{
+        .success = true,
+        .version = .tls_1_3,
+        .cipher_suite = .TLS_AES_256_GCM_SHA384,
+        .named_group = .x25519,
+        .signature_scheme = .ecdsa_secp256r1_sha256,
+    };
+
+    const json = try result.toJson(testing.allocator);
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "TLS 1.3") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "x25519") != null);
+}
