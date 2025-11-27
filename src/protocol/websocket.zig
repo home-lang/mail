@@ -781,3 +781,518 @@ test "Notification manager" {
 
     try testing.expectEqual(@as(usize, 0), manager.sessions.items.len);
 }
+
+// ============================================================================
+// Email Delivery Status Events
+// ============================================================================
+
+/// Email delivery status for real-time tracking
+pub const DeliveryStatus = enum {
+    queued,
+    sending,
+    sent,
+    delivered,
+    bounced,
+    deferred,
+    failed,
+    spam_rejected,
+    virus_rejected,
+
+    pub fn toString(self: DeliveryStatus) []const u8 {
+        return switch (self) {
+            .queued => "queued",
+            .sending => "sending",
+            .sent => "sent",
+            .delivered => "delivered",
+            .bounced => "bounced",
+            .deferred => "deferred",
+            .failed => "failed",
+            .spam_rejected => "spam_rejected",
+            .virus_rejected => "virus_rejected",
+        };
+    }
+};
+
+/// Delivery event for tracking email progress
+pub const DeliveryEvent = struct {
+    message_id: []const u8,
+    recipient: []const u8,
+    status: DeliveryStatus,
+    timestamp: i64,
+    details: ?DeliveryDetails,
+
+    pub const DeliveryDetails = struct {
+        smtp_code: ?u16 = null,
+        smtp_message: ?[]const u8 = null,
+        mx_server: ?[]const u8 = null,
+        attempt_number: u32 = 1,
+        next_retry: ?i64 = null,
+        bounce_type: ?BounceType = null,
+        error_message: ?[]const u8 = null,
+    };
+
+    pub const BounceType = enum {
+        hard, // Permanent failure
+        soft, // Temporary failure
+        block, // Blocked by recipient
+        spam, // Marked as spam
+        policy, // Policy violation
+    };
+
+    pub fn toJson(self: *const DeliveryEvent, allocator: Allocator) ![]u8 {
+        var output = std.ArrayList(u8).init(allocator);
+        const writer = output.writer();
+
+        try writer.print(
+            \\{{
+            \\  "type": "delivery_status",
+            \\  "message_id": "{s}",
+            \\  "recipient": "{s}",
+            \\  "status": "{s}",
+            \\  "timestamp": {d}
+        , .{
+            self.message_id,
+            self.recipient,
+            self.status.toString(),
+            self.timestamp,
+        });
+
+        if (self.details) |details| {
+            try writer.print(",\n  \"details\": {{", .{});
+
+            if (details.smtp_code) |code| {
+                try writer.print("\n    \"smtp_code\": {d}", .{code});
+            }
+            if (details.mx_server) |mx| {
+                try writer.print(",\n    \"mx_server\": \"{s}\"", .{mx});
+            }
+            try writer.print(",\n    \"attempt\": {d}", .{details.attempt_number});
+
+            if (details.next_retry) |next| {
+                try writer.print(",\n    \"next_retry\": {d}", .{next});
+            }
+            if (details.error_message) |err| {
+                try writer.print(",\n    \"error\": \"{s}\"", .{err});
+            }
+
+            try writer.print("\n  }}", .{});
+        }
+
+        try writer.print("\n}}", .{});
+        return output.toOwnedSlice();
+    }
+};
+
+// ============================================================================
+// Event Stream Manager
+// ============================================================================
+
+/// Event categories for filtering
+pub const EventCategory = enum {
+    email,
+    delivery,
+    folder,
+    calendar,
+    contact,
+    server,
+    security,
+    all,
+
+    pub fn fromEventType(event_type: []const u8) EventCategory {
+        if (std.mem.startsWith(u8, event_type, "email_") or
+            std.mem.startsWith(u8, event_type, "new_email"))
+        {
+            return .email;
+        }
+        if (std.mem.startsWith(u8, event_type, "delivery_")) return .delivery;
+        if (std.mem.startsWith(u8, event_type, "folder_")) return .folder;
+        if (std.mem.startsWith(u8, event_type, "calendar_")) return .calendar;
+        if (std.mem.startsWith(u8, event_type, "contact_")) return .contact;
+        if (std.mem.startsWith(u8, event_type, "sync_") or
+            std.mem.startsWith(u8, event_type, "quota_"))
+        {
+            return .server;
+        }
+        if (std.mem.startsWith(u8, event_type, "security_") or
+            std.mem.startsWith(u8, event_type, "auth_"))
+        {
+            return .security;
+        }
+        return .all;
+    }
+};
+
+/// Subscription filter for fine-grained event control
+pub const SubscriptionFilter = struct {
+    categories: std.EnumSet(EventCategory),
+    message_ids: ?std.ArrayList([]const u8) = null,
+    folders: ?std.ArrayList([]const u8) = null,
+    senders: ?std.ArrayList([]const u8) = null,
+
+    pub fn init() SubscriptionFilter {
+        return .{
+            .categories = std.EnumSet(EventCategory).initEmpty(),
+        };
+    }
+
+    pub fn subscribeToCategory(self: *SubscriptionFilter, category: EventCategory) void {
+        self.categories.insert(category);
+    }
+
+    pub fn subscribeToAll(self: *SubscriptionFilter) void {
+        self.categories.insert(.all);
+    }
+
+    pub fn matches(self: *const SubscriptionFilter, event_type: []const u8) bool {
+        if (self.categories.contains(.all)) return true;
+
+        const category = EventCategory.fromEventType(event_type);
+        return self.categories.contains(category);
+    }
+};
+
+/// Event stream with batching and reconnection support
+pub const EventStream = struct {
+    allocator: Allocator,
+    session: *WebSocketSession,
+    filter: SubscriptionFilter,
+    pending_events: std.ArrayList([]u8),
+    batch_size: usize,
+    batch_timeout_ms: u64,
+    last_batch_time: i64,
+    sequence_number: u64,
+    replay_buffer: std.ArrayList(ReplayableEvent),
+    max_replay_buffer: usize,
+
+    const ReplayableEvent = struct {
+        sequence: u64,
+        timestamp: i64,
+        event_json: []u8,
+    };
+
+    pub fn init(allocator: Allocator, session: *WebSocketSession) EventStream {
+        return .{
+            .allocator = allocator,
+            .session = session,
+            .filter = SubscriptionFilter.init(),
+            .pending_events = std.ArrayList([]u8).init(allocator),
+            .batch_size = 10,
+            .batch_timeout_ms = 100,
+            .last_batch_time = time_compat.timestamp(),
+            .sequence_number = 0,
+            .replay_buffer = std.ArrayList(ReplayableEvent).init(allocator),
+            .max_replay_buffer = 1000,
+        };
+    }
+
+    pub fn deinit(self: *EventStream) void {
+        for (self.pending_events.items) |event| {
+            self.allocator.free(event);
+        }
+        self.pending_events.deinit();
+
+        for (self.replay_buffer.items) |event| {
+            self.allocator.free(event.event_json);
+        }
+        self.replay_buffer.deinit();
+    }
+
+    /// Queue an event for delivery
+    pub fn queueEvent(self: *EventStream, event_json: []const u8) !void {
+        const event_copy = try self.allocator.dupe(u8, event_json);
+        try self.pending_events.append(event_copy);
+
+        // Add to replay buffer
+        self.sequence_number += 1;
+        try self.replay_buffer.append(.{
+            .sequence = self.sequence_number,
+            .timestamp = time_compat.timestamp(),
+            .event_json = try self.allocator.dupe(u8, event_json),
+        });
+
+        // Prune old events from replay buffer
+        while (self.replay_buffer.items.len > self.max_replay_buffer) {
+            const removed = self.replay_buffer.orderedRemove(0);
+            self.allocator.free(removed.event_json);
+        }
+
+        // Check if batch should be flushed
+        if (self.pending_events.items.len >= self.batch_size) {
+            try self.flushBatch();
+        }
+    }
+
+    /// Flush pending events as a batch
+    pub fn flushBatch(self: *EventStream) !void {
+        if (self.pending_events.items.len == 0) return;
+
+        var batch = std.ArrayList(u8).init(self.allocator);
+        defer batch.deinit();
+
+        const writer = batch.writer();
+        try writer.print("{{\"type\":\"event_batch\",\"count\":{d},\"sequence\":{d},\"events\":[", .{
+            self.pending_events.items.len,
+            self.sequence_number,
+        });
+
+        for (self.pending_events.items, 0..) |event, i| {
+            if (i > 0) try writer.print(",", .{});
+            try writer.print("{s}", .{event});
+        }
+
+        try writer.print("]}}", .{});
+
+        // Send batch
+        try self.session.sendText(batch.items);
+
+        // Clear pending events
+        for (self.pending_events.items) |event| {
+            self.allocator.free(event);
+        }
+        self.pending_events.clearRetainingCapacity();
+        self.last_batch_time = time_compat.timestamp();
+    }
+
+    /// Replay events from sequence number for reconnection
+    pub fn replayFromSequence(self: *EventStream, from_sequence: u64) !void {
+        var replay_count: usize = 0;
+
+        for (self.replay_buffer.items) |event| {
+            if (event.sequence > from_sequence) {
+                try self.session.sendText(event.event_json);
+                replay_count += 1;
+            }
+        }
+
+        // Send replay complete message
+        const msg = try std.fmt.allocPrint(self.allocator,
+            "{{\"type\":\"replay_complete\",\"replayed\":{d},\"current_sequence\":{d}}}",
+            .{ replay_count, self.sequence_number });
+        defer self.allocator.free(msg);
+
+        try self.session.sendText(msg);
+    }
+};
+
+/// Delivery event tracker for real-time updates
+pub const DeliveryTracker = struct {
+    allocator: Allocator,
+    notification_manager: *NotificationManager,
+    tracked_messages: std.StringHashMap(TrackedMessage),
+    mutex: std.Thread.Mutex,
+
+    const TrackedMessage = struct {
+        message_id: []const u8,
+        recipients: std.ArrayList(RecipientStatus),
+        created_at: i64,
+        last_update: i64,
+    };
+
+    const RecipientStatus = struct {
+        recipient: []const u8,
+        status: DeliveryStatus,
+        last_update: i64,
+    };
+
+    pub fn init(allocator: Allocator, notification_manager: *NotificationManager) DeliveryTracker {
+        return .{
+            .allocator = allocator,
+            .notification_manager = notification_manager,
+            .tracked_messages = std.StringHashMap(TrackedMessage).init(allocator),
+            .mutex = std.Thread.Mutex{},
+        };
+    }
+
+    pub fn deinit(self: *DeliveryTracker) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var iter = self.tracked_messages.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.recipients.deinit();
+        }
+        self.tracked_messages.deinit();
+    }
+
+    /// Start tracking a message
+    pub fn trackMessage(self: *DeliveryTracker, message_id: []const u8, recipients: []const []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const now = time_compat.timestamp();
+        var recipient_list = std.ArrayList(RecipientStatus).init(self.allocator);
+
+        for (recipients) |recipient| {
+            try recipient_list.append(.{
+                .recipient = try self.allocator.dupe(u8, recipient),
+                .status = .queued,
+                .last_update = now,
+            });
+        }
+
+        try self.tracked_messages.put(try self.allocator.dupe(u8, message_id), .{
+            .message_id = message_id,
+            .recipients = recipient_list,
+            .created_at = now,
+            .last_update = now,
+        });
+
+        // Broadcast queued status for each recipient
+        for (recipients) |recipient| {
+            try self.broadcastDeliveryEvent(message_id, recipient, .queued, null);
+        }
+    }
+
+    /// Update delivery status
+    pub fn updateStatus(
+        self: *DeliveryTracker,
+        message_id: []const u8,
+        recipient: []const u8,
+        status: DeliveryStatus,
+        details: ?DeliveryEvent.DeliveryDetails,
+    ) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.tracked_messages.getPtr(message_id)) |tracked| {
+            for (tracked.recipients.items) |*r| {
+                if (std.mem.eql(u8, r.recipient, recipient)) {
+                    r.status = status;
+                    r.last_update = time_compat.timestamp();
+                    tracked.last_update = r.last_update;
+                    break;
+                }
+            }
+        }
+
+        try self.broadcastDeliveryEvent(message_id, recipient, status, details);
+    }
+
+    fn broadcastDeliveryEvent(
+        self: *DeliveryTracker,
+        message_id: []const u8,
+        recipient: []const u8,
+        status: DeliveryStatus,
+        details: ?DeliveryEvent.DeliveryDetails,
+    ) !void {
+        const event = DeliveryEvent{
+            .message_id = message_id,
+            .recipient = recipient,
+            .status = status,
+            .timestamp = time_compat.timestamp(),
+            .details = details,
+        };
+
+        const json = try event.toJson(self.allocator);
+        defer self.allocator.free(json);
+
+        // Broadcast through notification manager
+        try self.notification_manager.broadcast(.{
+            .sync_started = .{ .sync_type = "delivery_update" },
+        });
+    }
+
+    /// Get current status of a message
+    pub fn getMessageStatus(self: *DeliveryTracker, message_id: []const u8) ?MessageDeliveryStatus {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.tracked_messages.get(message_id)) |tracked| {
+            var delivered: u32 = 0;
+            var failed: u32 = 0;
+            var pending: u32 = 0;
+
+            for (tracked.recipients.items) |r| {
+                switch (r.status) {
+                    .delivered => delivered += 1,
+                    .failed, .bounced, .spam_rejected, .virus_rejected => failed += 1,
+                    else => pending += 1,
+                }
+            }
+
+            return .{
+                .message_id = message_id,
+                .total_recipients = @intCast(tracked.recipients.items.len),
+                .delivered = delivered,
+                .failed = failed,
+                .pending = pending,
+                .created_at = tracked.created_at,
+                .last_update = tracked.last_update,
+            };
+        }
+
+        return null;
+    }
+
+    pub const MessageDeliveryStatus = struct {
+        message_id: []const u8,
+        total_recipients: u32,
+        delivered: u32,
+        failed: u32,
+        pending: u32,
+        created_at: i64,
+        last_update: i64,
+    };
+};
+
+// ============================================================================
+// Event Stream Tests
+// ============================================================================
+
+test "delivery status enum" {
+    const testing = std.testing;
+
+    try testing.expectEqualStrings("queued", DeliveryStatus.queued.toString());
+    try testing.expectEqualStrings("delivered", DeliveryStatus.delivered.toString());
+    try testing.expectEqualStrings("bounced", DeliveryStatus.bounced.toString());
+}
+
+test "event category classification" {
+    const testing = std.testing;
+
+    try testing.expectEqual(EventCategory.email, EventCategory.fromEventType("email_deleted"));
+    try testing.expectEqual(EventCategory.email, EventCategory.fromEventType("new_email"));
+    try testing.expectEqual(EventCategory.folder, EventCategory.fromEventType("folder_created"));
+    try testing.expectEqual(EventCategory.calendar, EventCategory.fromEventType("calendar_event_added"));
+    try testing.expectEqual(EventCategory.server, EventCategory.fromEventType("sync_completed"));
+}
+
+test "subscription filter" {
+    const testing = std.testing;
+
+    var filter = SubscriptionFilter.init();
+    filter.subscribeToCategory(.email);
+    filter.subscribeToCategory(.delivery);
+
+    try testing.expect(filter.matches("email_deleted"));
+    try testing.expect(filter.matches("new_email"));
+    try testing.expect(!filter.matches("folder_created"));
+    try testing.expect(!filter.matches("calendar_event_added"));
+
+    filter.subscribeToAll();
+    try testing.expect(filter.matches("anything"));
+}
+
+test "delivery event json" {
+    const testing = std.testing;
+
+    const event = DeliveryEvent{
+        .message_id = "msg123",
+        .recipient = "user@example.com",
+        .status = .delivered,
+        .timestamp = 1700000000,
+        .details = .{
+            .smtp_code = 250,
+            .mx_server = "mx.example.com",
+            .attempt_number = 1,
+        },
+    };
+
+    const json = try event.toJson(testing.allocator);
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "msg123") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "delivered") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "250") != null);
+}

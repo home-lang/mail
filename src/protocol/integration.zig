@@ -849,3 +849,684 @@ test "websocket frame parsing" {
         try std.testing.expect(false);
     }
 }
+
+// =============================================================================
+// Protocol Integration Test Suite
+// =============================================================================
+
+/// Integration test context for protocol testing
+pub const IntegrationTestContext = struct {
+    allocator: Allocator,
+    server: *ProtocolServer,
+    test_mailbox: TestMailbox,
+    test_auth: TestAuthProvider,
+
+    pub fn init(allocator: Allocator) !IntegrationTestContext {
+        const config = ProtocolConfig{
+            .enable_smtp = true,
+            .enable_imap = true,
+            .enable_pop3 = true,
+            .enable_websocket = true,
+            .smtp_port = 12525,
+            .imap_port = 11143,
+            .pop3_port = 11110,
+            .websocket_port = 18080,
+        };
+
+        const server = try allocator.create(ProtocolServer);
+        server.* = try ProtocolServer.init(allocator, config);
+
+        return .{
+            .allocator = allocator,
+            .server = server,
+            .test_mailbox = TestMailbox.init(allocator),
+            .test_auth = TestAuthProvider.init(),
+        };
+    }
+
+    pub fn deinit(self: *IntegrationTestContext) void {
+        self.server.deinit();
+        self.allocator.destroy(self.server);
+        self.test_mailbox.deinit();
+    }
+};
+
+/// Test mailbox for integration testing
+pub const TestMailbox = struct {
+    allocator: Allocator,
+    messages: std.ArrayList(TestMessage),
+    folders: std.StringHashMap(std.ArrayList(u64)),
+
+    pub const TestMessage = struct {
+        id: u64,
+        uid: u64,
+        from: []const u8,
+        to: []const u8,
+        subject: []const u8,
+        body: []const u8,
+        flags: MessageFlags,
+        size: u64,
+        received_at: i64,
+    };
+
+    pub const MessageFlags = struct {
+        seen: bool = false,
+        answered: bool = false,
+        flagged: bool = false,
+        deleted: bool = false,
+        draft: bool = false,
+        recent: bool = true,
+    };
+
+    pub fn init(allocator: Allocator) TestMailbox {
+        return .{
+            .allocator = allocator,
+            .messages = std.ArrayList(TestMessage).init(allocator),
+            .folders = std.StringHashMap(std.ArrayList(u64)).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *TestMailbox) void {
+        self.messages.deinit();
+        var iter = self.folders.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.folders.deinit();
+    }
+
+    pub fn addMessage(self: *TestMailbox, folder: []const u8, msg: TestMessage) !u64 {
+        try self.messages.append(msg);
+        const msg_id = self.messages.items.len;
+
+        var folder_list = self.folders.get(folder) orelse blk: {
+            const new_list = std.ArrayList(u64).init(self.allocator);
+            try self.folders.put(folder, new_list);
+            break :blk self.folders.get(folder).?;
+        };
+        try folder_list.append(msg_id);
+
+        return msg_id;
+    }
+
+    pub fn getMessageCount(self: *TestMailbox, folder: []const u8) u32 {
+        if (self.folders.get(folder)) |list| {
+            return @intCast(list.items.len);
+        }
+        return 0;
+    }
+
+    pub fn getMessage(self: *TestMailbox, id: u64) ?*TestMessage {
+        if (id > 0 and id <= self.messages.items.len) {
+            return &self.messages.items[id - 1];
+        }
+        return null;
+    }
+};
+
+/// Test authentication provider
+pub const TestAuthProvider = struct {
+    users: [10]TestUser,
+    user_count: usize,
+
+    pub const TestUser = struct {
+        username: [64]u8,
+        username_len: usize,
+        password: [64]u8,
+        password_len: usize,
+        enabled: bool,
+    };
+
+    pub fn init() TestAuthProvider {
+        var provider = TestAuthProvider{
+            .users = undefined,
+            .user_count = 0,
+        };
+
+        // Add default test user
+        provider.addUser("testuser", "testpass") catch {};
+
+        return provider;
+    }
+
+    pub fn addUser(self: *TestAuthProvider, username: []const u8, password: []const u8) !void {
+        if (self.user_count >= 10) return error.TooManyUsers;
+
+        var user = &self.users[self.user_count];
+        @memcpy(user.username[0..username.len], username);
+        user.username_len = username.len;
+        @memcpy(user.password[0..password.len], password);
+        user.password_len = password.len;
+        user.enabled = true;
+        self.user_count += 1;
+    }
+
+    pub fn authenticate(self: *TestAuthProvider, username: []const u8, password: []const u8) bool {
+        for (self.users[0..self.user_count]) |user| {
+            if (user.enabled and
+                std.mem.eql(u8, user.username[0..user.username_len], username) and
+                std.mem.eql(u8, user.password[0..user.password_len], password))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+// =============================================================================
+// IMAP Integration
+// =============================================================================
+
+/// Full IMAP session handler for integration testing
+pub const ImapSession = struct {
+    allocator: Allocator,
+    state: ImapState,
+    authenticated_user: ?[]const u8,
+    selected_mailbox: ?[]const u8,
+    mailbox: *TestMailbox,
+    auth_provider: *TestAuthProvider,
+
+    pub const ImapState = enum {
+        not_authenticated,
+        authenticated,
+        selected,
+        logout,
+    };
+
+    pub fn init(allocator: Allocator, mailbox: *TestMailbox, auth: *TestAuthProvider) ImapSession {
+        return .{
+            .allocator = allocator,
+            .state = .not_authenticated,
+            .authenticated_user = null,
+            .selected_mailbox = null,
+            .mailbox = mailbox,
+            .auth_provider = auth,
+        };
+    }
+
+    pub fn handleCommand(self: *ImapSession, tag: []const u8, cmd: []const u8, args: []const u8) ![]u8 {
+        const cmd_lower = std.ascii.lowerString(&[_]u8{0} ** 20, cmd);
+        const cmd_name = cmd_lower[0..@min(cmd.len, 20)];
+
+        if (std.mem.eql(u8, cmd_name[0..cmd.len], "capability")) {
+            return self.cmdCapability(tag);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "login")) {
+            return self.cmdLogin(tag, args);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "select")) {
+            return self.cmdSelect(tag, args);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "list")) {
+            return self.cmdList(tag, args);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "status")) {
+            return self.cmdStatus(tag, args);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "fetch")) {
+            return self.cmdFetch(tag, args);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "noop")) {
+            return std.fmt.allocPrint(self.allocator, "{s} OK NOOP completed\r\n", .{tag});
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "logout")) {
+            self.state = .logout;
+            return std.fmt.allocPrint(self.allocator,
+                "* BYE IMAP4rev1 Server logging out\r\n{s} OK LOGOUT completed\r\n", .{tag});
+        } else {
+            return std.fmt.allocPrint(self.allocator, "{s} BAD Unknown command\r\n", .{tag});
+        }
+    }
+
+    fn cmdCapability(self: *ImapSession, tag: []const u8) ![]u8 {
+        return std.fmt.allocPrint(self.allocator,
+            "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN AUTH=LOGIN IDLE NAMESPACE\r\n{s} OK CAPABILITY completed\r\n",
+            .{tag});
+    }
+
+    fn cmdLogin(self: *ImapSession, tag: []const u8, args: []const u8) ![]u8 {
+        // Parse username and password from args
+        var iter = std.mem.splitScalar(u8, args, ' ');
+        const username = iter.next() orelse return std.fmt.allocPrint(
+            self.allocator, "{s} BAD Missing username\r\n", .{tag});
+        const password = iter.next() orelse return std.fmt.allocPrint(
+            self.allocator, "{s} BAD Missing password\r\n", .{tag});
+
+        // Remove quotes if present
+        const clean_user = std.mem.trim(u8, username, "\"");
+        const clean_pass = std.mem.trim(u8, password, "\"");
+
+        if (self.auth_provider.authenticate(clean_user, clean_pass)) {
+            self.state = .authenticated;
+            self.authenticated_user = clean_user;
+            return std.fmt.allocPrint(self.allocator, "{s} OK LOGIN completed\r\n", .{tag});
+        } else {
+            return std.fmt.allocPrint(self.allocator, "{s} NO LOGIN failed\r\n", .{tag});
+        }
+    }
+
+    fn cmdSelect(self: *ImapSession, tag: []const u8, args: []const u8) ![]u8 {
+        if (self.state == .not_authenticated) {
+            return std.fmt.allocPrint(self.allocator, "{s} BAD Not authenticated\r\n", .{tag});
+        }
+
+        const mailbox_name = std.mem.trim(u8, args, "\" \t");
+        self.selected_mailbox = mailbox_name;
+        self.state = .selected;
+
+        const msg_count = self.mailbox.getMessageCount(mailbox_name);
+
+        return std.fmt.allocPrint(self.allocator,
+            \\* {d} EXISTS
+            \\* 0 RECENT
+            \\* OK [UIDVALIDITY 1] UIDs valid
+            \\* OK [UIDNEXT {d}] Predicted next UID
+            \\* FLAGS (\Seen \Answered \Flagged \Deleted \Draft)
+            \\* OK [PERMANENTFLAGS (\Seen \Answered \Flagged \Deleted \Draft \*)] Flags permitted
+            \\{s} OK [READ-WRITE] SELECT completed
+            \\
+        , .{ msg_count, msg_count + 1, tag });
+    }
+
+    fn cmdList(self: *ImapSession, tag: []const u8, args: []const u8) ![]u8 {
+        _ = args;
+        if (self.state == .not_authenticated) {
+            return std.fmt.allocPrint(self.allocator, "{s} BAD Not authenticated\r\n", .{tag});
+        }
+
+        return std.fmt.allocPrint(self.allocator,
+            \\* LIST (\HasNoChildren) "/" "INBOX"
+            \\* LIST (\HasNoChildren) "/" "Sent"
+            \\* LIST (\HasNoChildren) "/" "Drafts"
+            \\* LIST (\HasNoChildren \Trash) "/" "Trash"
+            \\{s} OK LIST completed
+            \\
+        , .{tag});
+    }
+
+    fn cmdStatus(self: *ImapSession, tag: []const u8, args: []const u8) ![]u8 {
+        if (self.state == .not_authenticated) {
+            return std.fmt.allocPrint(self.allocator, "{s} BAD Not authenticated\r\n", .{tag});
+        }
+
+        var iter = std.mem.splitScalar(u8, args, ' ');
+        const mailbox_name = std.mem.trim(u8, iter.next() orelse "INBOX", "\"");
+        const msg_count = self.mailbox.getMessageCount(mailbox_name);
+
+        return std.fmt.allocPrint(self.allocator,
+            "* STATUS \"{s}\" (MESSAGES {d} UNSEEN 0 UIDNEXT {d})\r\n{s} OK STATUS completed\r\n",
+            .{ mailbox_name, msg_count, msg_count + 1, tag });
+    }
+
+    fn cmdFetch(self: *ImapSession, tag: []const u8, args: []const u8) ![]u8 {
+        if (self.state != .selected) {
+            return std.fmt.allocPrint(self.allocator, "{s} BAD No mailbox selected\r\n", .{tag});
+        }
+
+        // Parse sequence set and data items
+        var iter = std.mem.splitScalar(u8, args, ' ');
+        const seq_set = iter.next() orelse "1";
+        _ = seq_set;
+
+        // Return simple fetch response
+        return std.fmt.allocPrint(self.allocator,
+            "* 1 FETCH (FLAGS (\\Seen) RFC822.SIZE 1024)\r\n{s} OK FETCH completed\r\n",
+            .{tag});
+    }
+};
+
+// =============================================================================
+// POP3 Integration
+// =============================================================================
+
+/// Full POP3 session handler for integration testing
+pub const Pop3Session = struct {
+    allocator: Allocator,
+    state: Pop3State,
+    authenticated_user: ?[]const u8,
+    pending_username: ?[]const u8,
+    mailbox: *TestMailbox,
+    auth_provider: *TestAuthProvider,
+    deleted_messages: std.ArrayList(u64),
+
+    pub const Pop3State = enum {
+        authorization,
+        transaction,
+        update,
+    };
+
+    pub fn init(allocator: Allocator, mailbox: *TestMailbox, auth: *TestAuthProvider) Pop3Session {
+        return .{
+            .allocator = allocator,
+            .state = .authorization,
+            .authenticated_user = null,
+            .pending_username = null,
+            .mailbox = mailbox,
+            .auth_provider = auth,
+            .deleted_messages = std.ArrayList(u64).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Pop3Session) void {
+        self.deleted_messages.deinit();
+    }
+
+    pub fn handleCommand(self: *Pop3Session, cmd: []const u8, arg: ?[]const u8) ![]u8 {
+        const cmd_upper = std.ascii.upperString(&[_]u8{0} ** 10, cmd);
+        const cmd_name = cmd_upper[0..@min(cmd.len, 10)];
+
+        if (std.mem.eql(u8, cmd_name[0..cmd.len], "USER")) {
+            return self.cmdUser(arg);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "PASS")) {
+            return self.cmdPass(arg);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "STAT")) {
+            return self.cmdStat();
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "LIST")) {
+            return self.cmdList(arg);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "RETR")) {
+            return self.cmdRetr(arg);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "DELE")) {
+            return self.cmdDele(arg);
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "NOOP")) {
+            return std.fmt.allocPrint(self.allocator, "+OK\r\n", .{});
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "RSET")) {
+            return self.cmdRset();
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "QUIT")) {
+            return self.cmdQuit();
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "CAPA")) {
+            return self.cmdCapa();
+        } else if (std.mem.eql(u8, cmd_name[0..cmd.len], "UIDL")) {
+            return self.cmdUidl(arg);
+        } else {
+            return std.fmt.allocPrint(self.allocator, "-ERR Unknown command\r\n", .{});
+        }
+    }
+
+    fn cmdUser(self: *Pop3Session, arg: ?[]const u8) ![]u8 {
+        if (self.state != .authorization) {
+            return std.fmt.allocPrint(self.allocator, "-ERR Already authenticated\r\n", .{});
+        }
+        const username = arg orelse return std.fmt.allocPrint(
+            self.allocator, "-ERR Missing username\r\n", .{});
+        self.pending_username = username;
+        return std.fmt.allocPrint(self.allocator, "+OK User accepted\r\n", .{});
+    }
+
+    fn cmdPass(self: *Pop3Session, arg: ?[]const u8) ![]u8 {
+        if (self.state != .authorization) {
+            return std.fmt.allocPrint(self.allocator, "-ERR Already authenticated\r\n", .{});
+        }
+        const password = arg orelse return std.fmt.allocPrint(
+            self.allocator, "-ERR Missing password\r\n", .{});
+        const username = self.pending_username orelse return std.fmt.allocPrint(
+            self.allocator, "-ERR Send USER first\r\n", .{});
+
+        if (self.auth_provider.authenticate(username, password)) {
+            self.state = .transaction;
+            self.authenticated_user = username;
+            return std.fmt.allocPrint(self.allocator, "+OK Mailbox open\r\n", .{});
+        } else {
+            return std.fmt.allocPrint(self.allocator, "-ERR Authentication failed\r\n", .{});
+        }
+    }
+
+    fn cmdStat(self: *Pop3Session) ![]u8 {
+        if (self.state != .transaction) {
+            return std.fmt.allocPrint(self.allocator, "-ERR Not authenticated\r\n", .{});
+        }
+        const msg_count = self.mailbox.getMessageCount("INBOX");
+        const total_size: u64 = msg_count * 1024; // Approximate
+        return std.fmt.allocPrint(self.allocator, "+OK {d} {d}\r\n", .{ msg_count, total_size });
+    }
+
+    fn cmdList(self: *Pop3Session, arg: ?[]const u8) ![]u8 {
+        if (self.state != .transaction) {
+            return std.fmt.allocPrint(self.allocator, "-ERR Not authenticated\r\n", .{});
+        }
+
+        if (arg) |msg_num_str| {
+            const msg_num = std.fmt.parseInt(u64, msg_num_str, 10) catch
+                return std.fmt.allocPrint(self.allocator, "-ERR Invalid message number\r\n", .{});
+            if (self.mailbox.getMessage(msg_num)) |msg| {
+                return std.fmt.allocPrint(self.allocator, "+OK {d} {d}\r\n", .{ msg_num, msg.size });
+            } else {
+                return std.fmt.allocPrint(self.allocator, "-ERR No such message\r\n", .{});
+            }
+        }
+
+        // List all messages
+        var output = std.ArrayList(u8).init(self.allocator);
+        const writer = output.writer();
+        const msg_count = self.mailbox.getMessageCount("INBOX");
+        try writer.print("+OK {d} messages\r\n", .{msg_count});
+
+        for (self.mailbox.messages.items, 0..) |msg, i| {
+            try writer.print("{d} {d}\r\n", .{ i + 1, msg.size });
+        }
+        try writer.print(".\r\n", .{});
+
+        return output.toOwnedSlice();
+    }
+
+    fn cmdRetr(self: *Pop3Session, arg: ?[]const u8) ![]u8 {
+        if (self.state != .transaction) {
+            return std.fmt.allocPrint(self.allocator, "-ERR Not authenticated\r\n", .{});
+        }
+        const msg_num_str = arg orelse return std.fmt.allocPrint(
+            self.allocator, "-ERR Missing message number\r\n", .{});
+        const msg_num = std.fmt.parseInt(u64, msg_num_str, 10) catch
+            return std.fmt.allocPrint(self.allocator, "-ERR Invalid message number\r\n", .{});
+
+        if (self.mailbox.getMessage(msg_num)) |msg| {
+            return std.fmt.allocPrint(self.allocator,
+                "+OK {d} octets\r\nFrom: {s}\r\nTo: {s}\r\nSubject: {s}\r\n\r\n{s}\r\n.\r\n",
+                .{ msg.size, msg.from, msg.to, msg.subject, msg.body });
+        }
+        return std.fmt.allocPrint(self.allocator, "-ERR No such message\r\n", .{});
+    }
+
+    fn cmdDele(self: *Pop3Session, arg: ?[]const u8) ![]u8 {
+        if (self.state != .transaction) {
+            return std.fmt.allocPrint(self.allocator, "-ERR Not authenticated\r\n", .{});
+        }
+        const msg_num_str = arg orelse return std.fmt.allocPrint(
+            self.allocator, "-ERR Missing message number\r\n", .{});
+        const msg_num = std.fmt.parseInt(u64, msg_num_str, 10) catch
+            return std.fmt.allocPrint(self.allocator, "-ERR Invalid message number\r\n", .{});
+
+        if (self.mailbox.getMessage(msg_num)) |_| {
+            try self.deleted_messages.append(msg_num);
+            return std.fmt.allocPrint(self.allocator, "+OK Message deleted\r\n", .{});
+        }
+        return std.fmt.allocPrint(self.allocator, "-ERR No such message\r\n", .{});
+    }
+
+    fn cmdRset(self: *Pop3Session) ![]u8 {
+        self.deleted_messages.clearRetainingCapacity();
+        return std.fmt.allocPrint(self.allocator, "+OK Maildrop reset\r\n", .{});
+    }
+
+    fn cmdQuit(self: *Pop3Session) ![]u8 {
+        self.state = .update;
+        // In update state, actually delete marked messages
+        return std.fmt.allocPrint(self.allocator, "+OK Goodbye\r\n", .{});
+    }
+
+    fn cmdCapa(self: *Pop3Session) ![]u8 {
+        return std.fmt.allocPrint(self.allocator,
+            \\+OK Capability list follows
+            \\TOP
+            \\USER
+            \\UIDL
+            \\STLS
+            \\.
+            \\
+        , .{});
+    }
+
+    fn cmdUidl(self: *Pop3Session, arg: ?[]const u8) ![]u8 {
+        if (self.state != .transaction) {
+            return std.fmt.allocPrint(self.allocator, "-ERR Not authenticated\r\n", .{});
+        }
+
+        if (arg) |msg_num_str| {
+            const msg_num = std.fmt.parseInt(u64, msg_num_str, 10) catch
+                return std.fmt.allocPrint(self.allocator, "-ERR Invalid message number\r\n", .{});
+            if (self.mailbox.getMessage(msg_num)) |msg| {
+                return std.fmt.allocPrint(self.allocator, "+OK {d} {d}\r\n", .{ msg_num, msg.uid });
+            }
+            return std.fmt.allocPrint(self.allocator, "-ERR No such message\r\n", .{});
+        }
+
+        // List all UIDs
+        var output = std.ArrayList(u8).init(self.allocator);
+        const writer = output.writer();
+        try writer.print("+OK\r\n", .{});
+
+        for (self.mailbox.messages.items, 0..) |msg, i| {
+            try writer.print("{d} {d}\r\n", .{ i + 1, msg.uid });
+        }
+        try writer.print(".\r\n", .{});
+
+        return output.toOwnedSlice();
+    }
+};
+
+// =============================================================================
+// Integration Tests
+// =============================================================================
+
+test "IMAP session authentication" {
+    const allocator = std.testing.allocator;
+
+    var mailbox = TestMailbox.init(allocator);
+    defer mailbox.deinit();
+
+    var auth = TestAuthProvider.init();
+
+    var session = ImapSession.init(allocator, &mailbox, &auth);
+
+    // Test CAPABILITY
+    const cap_response = try session.handleCommand("A001", "CAPABILITY", "");
+    defer allocator.free(cap_response);
+    try std.testing.expect(std.mem.indexOf(u8, cap_response, "IMAP4rev1") != null);
+
+    // Test failed LOGIN
+    const bad_login = try session.handleCommand("A002", "LOGIN", "\"baduser\" \"badpass\"");
+    defer allocator.free(bad_login);
+    try std.testing.expect(std.mem.indexOf(u8, bad_login, "NO") != null);
+
+    // Test successful LOGIN
+    const good_login = try session.handleCommand("A003", "LOGIN", "\"testuser\" \"testpass\"");
+    defer allocator.free(good_login);
+    try std.testing.expect(std.mem.indexOf(u8, good_login, "OK") != null);
+    try std.testing.expectEqual(ImapSession.ImapState.authenticated, session.state);
+}
+
+test "IMAP session mailbox operations" {
+    const allocator = std.testing.allocator;
+
+    var mailbox = TestMailbox.init(allocator);
+    defer mailbox.deinit();
+
+    var auth = TestAuthProvider.init();
+
+    var session = ImapSession.init(allocator, &mailbox, &auth);
+
+    // Login first
+    const login = try session.handleCommand("A001", "LOGIN", "\"testuser\" \"testpass\"");
+    defer allocator.free(login);
+
+    // Test LIST
+    const list_response = try session.handleCommand("A002", "LIST", "\"\" \"*\"");
+    defer allocator.free(list_response);
+    try std.testing.expect(std.mem.indexOf(u8, list_response, "INBOX") != null);
+
+    // Test SELECT
+    const select_response = try session.handleCommand("A003", "SELECT", "INBOX");
+    defer allocator.free(select_response);
+    try std.testing.expect(std.mem.indexOf(u8, select_response, "EXISTS") != null);
+    try std.testing.expectEqual(ImapSession.ImapState.selected, session.state);
+}
+
+test "POP3 session authentication" {
+    const allocator = std.testing.allocator;
+
+    var mailbox = TestMailbox.init(allocator);
+    defer mailbox.deinit();
+
+    var auth = TestAuthProvider.init();
+
+    var session = Pop3Session.init(allocator, &mailbox, &auth);
+    defer session.deinit();
+
+    // Test USER command
+    const user_response = try session.handleCommand("USER", "testuser");
+    defer allocator.free(user_response);
+    try std.testing.expect(std.mem.indexOf(u8, user_response, "+OK") != null);
+
+    // Test PASS with wrong password
+    const bad_pass = try session.handleCommand("PASS", "wrongpass");
+    defer allocator.free(bad_pass);
+    try std.testing.expect(std.mem.indexOf(u8, bad_pass, "-ERR") != null);
+
+    // Reset and try correct password
+    session.pending_username = "testuser";
+    const good_pass = try session.handleCommand("PASS", "testpass");
+    defer allocator.free(good_pass);
+    try std.testing.expect(std.mem.indexOf(u8, good_pass, "+OK") != null);
+    try std.testing.expectEqual(Pop3Session.Pop3State.transaction, session.state);
+}
+
+test "POP3 session mailbox operations" {
+    const allocator = std.testing.allocator;
+
+    var mailbox = TestMailbox.init(allocator);
+    defer mailbox.deinit();
+
+    // Add a test message
+    _ = try mailbox.addMessage("INBOX", .{
+        .id = 1,
+        .uid = 1001,
+        .from = "sender@example.com",
+        .to = "recipient@example.com",
+        .subject = "Test Subject",
+        .body = "Test body content",
+        .flags = .{},
+        .size = 256,
+        .received_at = 0,
+    });
+
+    var auth = TestAuthProvider.init();
+
+    var session = Pop3Session.init(allocator, &mailbox, &auth);
+    defer session.deinit();
+
+    // Authenticate
+    _ = try session.handleCommand("USER", "testuser");
+    const pass_response = try session.handleCommand("PASS", "testpass");
+    defer allocator.free(pass_response);
+
+    // Test STAT
+    const stat_response = try session.handleCommand("STAT", null);
+    defer allocator.free(stat_response);
+    try std.testing.expect(std.mem.indexOf(u8, stat_response, "+OK") != null);
+
+    // Test LIST
+    const list_response = try session.handleCommand("LIST", null);
+    defer allocator.free(list_response);
+    try std.testing.expect(std.mem.indexOf(u8, list_response, "+OK") != null);
+
+    // Test CAPA
+    const capa_response = try session.handleCommand("CAPA", null);
+    defer allocator.free(capa_response);
+    try std.testing.expect(std.mem.indexOf(u8, capa_response, "USER") != null);
+}
+
+test "protocol health status" {
+    const allocator = std.testing.allocator;
+
+    var server = try ProtocolServer.init(allocator, .{
+        .enable_smtp = true,
+        .enable_imap = true,
+        .enable_pop3 = true,
+    });
+    defer server.deinit();
+
+    const health = server.getHealth();
+    try std.testing.expectEqual(HealthLevel.healthy, health.overall);
+}

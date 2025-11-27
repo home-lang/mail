@@ -1007,3 +1007,734 @@ test "queue depth histogram" {
     try std.testing.expect(histogram.min.? == 5);
     try std.testing.expect(histogram.max.? == 1000);
 }
+
+// =============================================================================
+// ML Model Training Pipeline Infrastructure
+// =============================================================================
+
+/// Training dataset for batch model training
+pub const TrainingDataset = struct {
+    allocator: Allocator,
+    samples: std.ArrayList(LabeledSample),
+    spam_count: u64,
+    ham_count: u64,
+
+    pub const LabeledSample = struct {
+        message: EmailMessage,
+        label: FeedbackType,
+        source: DataSource,
+        timestamp: i64,
+    };
+
+    pub const DataSource = enum {
+        user_feedback,
+        manual_label,
+        imported,
+        synthesized,
+    };
+
+    pub fn init(allocator: Allocator) TrainingDataset {
+        return .{
+            .allocator = allocator,
+            .samples = std.ArrayList(LabeledSample).init(allocator),
+            .spam_count = 0,
+            .ham_count = 0,
+        };
+    }
+
+    pub fn deinit(self: *TrainingDataset) void {
+        self.samples.deinit();
+    }
+
+    pub fn addSample(self: *TrainingDataset, message: EmailMessage, label: FeedbackType, source: DataSource) !void {
+        try self.samples.append(.{
+            .message = message,
+            .label = label,
+            .source = source,
+            .timestamp = std.time.timestamp(),
+        });
+
+        if (label == .spam) {
+            self.spam_count += 1;
+        } else {
+            self.ham_count += 1;
+        }
+    }
+
+    /// Split dataset into training and validation sets
+    pub fn split(self: *TrainingDataset, train_ratio: f64) !struct { train: []LabeledSample, validation: []LabeledSample } {
+        const total = self.samples.items.len;
+        const train_count = @as(usize, @intFromFloat(@as(f64, @floatFromInt(total)) * train_ratio));
+
+        // Shuffle first (simple Fisher-Yates)
+        var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+        var random = prng.random();
+
+        var i: usize = total - 1;
+        while (i > 0) : (i -= 1) {
+            const j = random.uintLessThan(usize, i + 1);
+            const tmp = self.samples.items[i];
+            self.samples.items[i] = self.samples.items[j];
+            self.samples.items[j] = tmp;
+        }
+
+        return .{
+            .train = self.samples.items[0..train_count],
+            .validation = self.samples.items[train_count..],
+        };
+    }
+
+    /// Get dataset statistics
+    pub fn getStats(self: *const TrainingDataset) DatasetStats {
+        return .{
+            .total_samples = self.samples.items.len,
+            .spam_count = self.spam_count,
+            .ham_count = self.ham_count,
+            .spam_ratio = if (self.samples.items.len > 0)
+                @as(f64, @floatFromInt(self.spam_count)) / @as(f64, @floatFromInt(self.samples.items.len))
+            else
+                0.0,
+        };
+    }
+
+    pub const DatasetStats = struct {
+        total_samples: usize,
+        spam_count: u64,
+        ham_count: u64,
+        spam_ratio: f64,
+    };
+};
+
+/// Cross-validation for model evaluation
+pub const CrossValidator = struct {
+    allocator: Allocator,
+    config: SpamDetectorConfig,
+    k_folds: u32,
+
+    pub fn init(allocator: Allocator, config: SpamDetectorConfig, k_folds: u32) CrossValidator {
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .k_folds = k_folds,
+        };
+    }
+
+    /// Perform k-fold cross-validation
+    pub fn validate(self: *CrossValidator, dataset: *TrainingDataset) !CrossValidationResult {
+        const samples = dataset.samples.items;
+        const fold_size = samples.len / self.k_folds;
+
+        var fold_results = std.ArrayList(FoldResult).init(self.allocator);
+        defer fold_results.deinit();
+
+        var fold: u32 = 0;
+        while (fold < self.k_folds) : (fold += 1) {
+            const val_start = fold * fold_size;
+            const val_end = if (fold == self.k_folds - 1) samples.len else (fold + 1) * fold_size;
+
+            // Create classifier for this fold
+            var classifier = NaiveBayesClassifier.init(self.allocator, self.config);
+            defer classifier.deinit();
+
+            var extractor = try FeatureExtractor.init(self.allocator, self.config);
+            defer extractor.deinit();
+
+            // Train on all samples except validation fold
+            for (samples, 0..) |sample, i| {
+                if (i >= val_start and i < val_end) continue;
+
+                const features = try extractor.extractFeatures(&sample.message);
+                defer self.allocator.free(features);
+                try classifier.train(features, sample.label == .spam);
+            }
+
+            // Evaluate on validation fold
+            var true_positives: u64 = 0;
+            var true_negatives: u64 = 0;
+            var false_positives: u64 = 0;
+            var false_negatives: u64 = 0;
+
+            for (samples[val_start..val_end]) |sample| {
+                const features = try extractor.extractFeatures(&sample.message);
+                defer self.allocator.free(features);
+
+                const result = classifier.classify(features);
+                const actual_spam = sample.label == .spam;
+
+                if (result.is_spam and actual_spam) {
+                    true_positives += 1;
+                } else if (!result.is_spam and !actual_spam) {
+                    true_negatives += 1;
+                } else if (result.is_spam and !actual_spam) {
+                    false_positives += 1;
+                } else {
+                    false_negatives += 1;
+                }
+            }
+
+            try fold_results.append(.{
+                .fold = fold,
+                .true_positives = true_positives,
+                .true_negatives = true_negatives,
+                .false_positives = false_positives,
+                .false_negatives = false_negatives,
+            });
+        }
+
+        return self.aggregateResults(fold_results.items);
+    }
+
+    fn aggregateResults(self: *CrossValidator, folds: []FoldResult) CrossValidationResult {
+        _ = self;
+        var total_tp: u64 = 0;
+        var total_tn: u64 = 0;
+        var total_fp: u64 = 0;
+        var total_fn: u64 = 0;
+
+        for (folds) |fold| {
+            total_tp += fold.true_positives;
+            total_tn += fold.true_negatives;
+            total_fp += fold.false_positives;
+            total_fn += fold.false_negatives;
+        }
+
+        const total = total_tp + total_tn + total_fp + total_fn;
+        const total_f: f64 = @floatFromInt(total);
+
+        const accuracy = if (total > 0)
+            @as(f64, @floatFromInt(total_tp + total_tn)) / total_f
+        else
+            0.0;
+
+        const precision = if (total_tp + total_fp > 0)
+            @as(f64, @floatFromInt(total_tp)) / @as(f64, @floatFromInt(total_tp + total_fp))
+        else
+            0.0;
+
+        const recall = if (total_tp + total_fn > 0)
+            @as(f64, @floatFromInt(total_tp)) / @as(f64, @floatFromInt(total_tp + total_fn))
+        else
+            0.0;
+
+        const f1_score = if (precision + recall > 0)
+            2.0 * (precision * recall) / (precision + recall)
+        else
+            0.0;
+
+        return .{
+            .accuracy = accuracy,
+            .precision = precision,
+            .recall = recall,
+            .f1_score = f1_score,
+            .true_positives = total_tp,
+            .true_negatives = total_tn,
+            .false_positives = total_fp,
+            .false_negatives = total_fn,
+            .fold_count = @intCast(folds.len),
+        };
+    }
+
+    pub const FoldResult = struct {
+        fold: u32,
+        true_positives: u64,
+        true_negatives: u64,
+        false_positives: u64,
+        false_negatives: u64,
+    };
+
+    pub const CrossValidationResult = struct {
+        accuracy: f64,
+        precision: f64,
+        recall: f64,
+        f1_score: f64,
+        true_positives: u64,
+        true_negatives: u64,
+        false_positives: u64,
+        false_negatives: u64,
+        fold_count: u32,
+
+        pub fn toJson(self: *const CrossValidationResult, allocator: Allocator) ![]u8 {
+            return std.fmt.allocPrint(allocator,
+                \\{{
+                \\  "accuracy": {d:.4},
+                \\  "precision": {d:.4},
+                \\  "recall": {d:.4},
+                \\  "f1_score": {d:.4},
+                \\  "confusion_matrix": {{
+                \\    "true_positives": {d},
+                \\    "true_negatives": {d},
+                \\    "false_positives": {d},
+                \\    "false_negatives": {d}
+                \\  }},
+                \\  "fold_count": {d}
+                \\}}
+            , .{
+                self.accuracy,
+                self.precision,
+                self.recall,
+                self.f1_score,
+                self.true_positives,
+                self.true_negatives,
+                self.false_positives,
+                self.false_negatives,
+                self.fold_count,
+            });
+        }
+    };
+};
+
+/// A/B testing for model comparison
+pub const ABTester = struct {
+    allocator: Allocator,
+    model_a: *NaiveBayesClassifier,
+    model_b: *NaiveBayesClassifier,
+    config: ABTestConfig,
+    results_a: TestResults,
+    results_b: TestResults,
+    total_samples: u64,
+
+    pub const ABTestConfig = struct {
+        traffic_split: f64 = 0.5, // Ratio of traffic to model A
+        min_samples: u64 = 1000, // Minimum samples before results are significant
+        confidence_level: f64 = 0.95,
+    };
+
+    pub const TestResults = struct {
+        samples: u64 = 0,
+        correct: u64 = 0,
+        spam_caught: u64 = 0,
+        ham_passed: u64 = 0,
+        false_positives: u64 = 0,
+        false_negatives: u64 = 0,
+        total_latency_ns: u64 = 0,
+
+        pub fn accuracy(self: *const TestResults) f64 {
+            if (self.samples == 0) return 0.0;
+            return @as(f64, @floatFromInt(self.correct)) / @as(f64, @floatFromInt(self.samples));
+        }
+
+        pub fn avgLatencyMs(self: *const TestResults) f64 {
+            if (self.samples == 0) return 0.0;
+            return @as(f64, @floatFromInt(self.total_latency_ns)) / @as(f64, @floatFromInt(self.samples)) / 1_000_000.0;
+        }
+    };
+
+    pub fn init(
+        allocator: Allocator,
+        model_a: *NaiveBayesClassifier,
+        model_b: *NaiveBayesClassifier,
+        config: ABTestConfig,
+    ) ABTester {
+        return .{
+            .allocator = allocator,
+            .model_a = model_a,
+            .model_b = model_b,
+            .config = config,
+            .results_a = .{},
+            .results_b = .{},
+            .total_samples = 0,
+        };
+    }
+
+    /// Route a sample and record results
+    pub fn routeAndRecord(
+        self: *ABTester,
+        features: []const Feature,
+        actual_label: FeedbackType,
+    ) struct { used_model: enum { a, b }, result: ClassificationResult } {
+        self.total_samples += 1;
+
+        // Determine which model to use based on traffic split
+        var prng = std.Random.DefaultPrng.init(@intCast(self.total_samples));
+        const use_model_a = prng.random().float(f64) < self.config.traffic_split;
+
+        const start_time = std.time.nanoTimestamp();
+
+        const result = if (use_model_a)
+            self.model_a.classify(features)
+        else
+            self.model_b.classify(features);
+
+        const latency: u64 = @intCast(std.time.nanoTimestamp() - start_time);
+
+        const is_correct = (result.is_spam and actual_label == .spam) or
+            (!result.is_spam and actual_label == .not_spam);
+
+        const results = if (use_model_a) &self.results_a else &self.results_b;
+        results.samples += 1;
+        results.total_latency_ns += latency;
+
+        if (is_correct) {
+            results.correct += 1;
+            if (result.is_spam) {
+                results.spam_caught += 1;
+            } else {
+                results.ham_passed += 1;
+            }
+        } else {
+            if (result.is_spam) {
+                results.false_positives += 1;
+            } else {
+                results.false_negatives += 1;
+            }
+        }
+
+        return .{
+            .used_model = if (use_model_a) .a else .b,
+            .result = result,
+        };
+    }
+
+    /// Check if we have enough samples for significant results
+    pub fn isSignificant(self: *const ABTester) bool {
+        return self.results_a.samples >= self.config.min_samples and
+            self.results_b.samples >= self.config.min_samples;
+    }
+
+    /// Get comparison results
+    pub fn getComparison(self: *const ABTester) ABTestComparison {
+        const accuracy_diff = self.results_a.accuracy() - self.results_b.accuracy();
+        const latency_diff = self.results_a.avgLatencyMs() - self.results_b.avgLatencyMs();
+
+        return .{
+            .model_a_accuracy = self.results_a.accuracy(),
+            .model_b_accuracy = self.results_b.accuracy(),
+            .accuracy_difference = accuracy_diff,
+            .model_a_latency_ms = self.results_a.avgLatencyMs(),
+            .model_b_latency_ms = self.results_b.avgLatencyMs(),
+            .latency_difference_ms = latency_diff,
+            .model_a_samples = self.results_a.samples,
+            .model_b_samples = self.results_b.samples,
+            .is_significant = self.isSignificant(),
+            .recommended_model = if (accuracy_diff > 0.01) .a else if (accuracy_diff < -0.01) .b else .no_difference,
+        };
+    }
+
+    pub const ABTestComparison = struct {
+        model_a_accuracy: f64,
+        model_b_accuracy: f64,
+        accuracy_difference: f64,
+        model_a_latency_ms: f64,
+        model_b_latency_ms: f64,
+        latency_difference_ms: f64,
+        model_a_samples: u64,
+        model_b_samples: u64,
+        is_significant: bool,
+        recommended_model: enum { a, b, no_difference },
+    };
+};
+
+/// Training job for async batch training
+pub const TrainingJob = struct {
+    id: u64,
+    status: Status,
+    config: JobConfig,
+    progress: Progress,
+    result: ?TrainingResult,
+    started_at: i64,
+    completed_at: ?i64,
+    error_message: ?[]const u8,
+
+    pub const Status = enum {
+        pending,
+        running,
+        completed,
+        failed,
+        cancelled,
+    };
+
+    pub const JobConfig = struct {
+        dataset_path: []const u8,
+        output_model_path: []const u8,
+        validation_split: f64 = 0.2,
+        use_cross_validation: bool = true,
+        k_folds: u32 = 5,
+        early_stopping: bool = true,
+        min_improvement: f64 = 0.001,
+    };
+
+    pub const Progress = struct {
+        current_epoch: u32 = 0,
+        total_epochs: u32 = 0,
+        samples_processed: u64 = 0,
+        total_samples: u64 = 0,
+        current_accuracy: f64 = 0.0,
+        best_accuracy: f64 = 0.0,
+    };
+
+    pub const TrainingResult = struct {
+        final_accuracy: f64,
+        final_precision: f64,
+        final_recall: f64,
+        final_f1: f64,
+        epochs_completed: u32,
+        training_time_seconds: u64,
+        model_version: u32,
+    };
+};
+
+/// Training job manager
+pub const TrainingJobManager = struct {
+    allocator: Allocator,
+    jobs: std.ArrayList(TrainingJob),
+    next_job_id: u64,
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: Allocator) TrainingJobManager {
+        return .{
+            .allocator = allocator,
+            .jobs = std.ArrayList(TrainingJob).init(allocator),
+            .next_job_id = 1,
+            .mutex = std.Thread.Mutex{},
+        };
+    }
+
+    pub fn deinit(self: *TrainingJobManager) void {
+        self.jobs.deinit();
+    }
+
+    /// Submit a new training job
+    pub fn submitJob(self: *TrainingJobManager, config: TrainingJob.JobConfig) !u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const job_id = self.next_job_id;
+        self.next_job_id += 1;
+
+        try self.jobs.append(.{
+            .id = job_id,
+            .status = .pending,
+            .config = config,
+            .progress = .{},
+            .result = null,
+            .started_at = std.time.timestamp(),
+            .completed_at = null,
+            .error_message = null,
+        });
+
+        return job_id;
+    }
+
+    /// Get job status
+    pub fn getJobStatus(self: *TrainingJobManager, job_id: u64) ?TrainingJob {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.jobs.items) |job| {
+            if (job.id == job_id) return job;
+        }
+        return null;
+    }
+
+    /// Cancel a job
+    pub fn cancelJob(self: *TrainingJobManager, job_id: u64) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.jobs.items) |*job| {
+            if (job.id == job_id and (job.status == .pending or job.status == .running)) {
+                job.status = .cancelled;
+                job.completed_at = std.time.timestamp();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// List all jobs
+    pub fn listJobs(self: *TrainingJobManager, status_filter: ?TrainingJob.Status) []TrainingJob {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (status_filter) |filter| {
+            var filtered = std.ArrayList(TrainingJob).init(self.allocator);
+            for (self.jobs.items) |job| {
+                if (job.status == filter) {
+                    filtered.append(job) catch continue;
+                }
+            }
+            return filtered.toOwnedSlice() catch return &[_]TrainingJob{};
+        }
+        return self.jobs.items;
+    }
+};
+
+/// Model performance reporter
+pub const PerformanceReporter = struct {
+    allocator: Allocator,
+    history: std.ArrayList(PerformanceSnapshot),
+    max_history: usize,
+
+    pub const PerformanceSnapshot = struct {
+        timestamp: i64,
+        model_version: u32,
+        accuracy: f64,
+        precision: f64,
+        recall: f64,
+        f1_score: f64,
+        samples_evaluated: u64,
+        avg_latency_ms: f64,
+    };
+
+    pub fn init(allocator: Allocator, max_history: usize) PerformanceReporter {
+        return .{
+            .allocator = allocator,
+            .history = std.ArrayList(PerformanceSnapshot).init(allocator),
+            .max_history = max_history,
+        };
+    }
+
+    pub fn deinit(self: *PerformanceReporter) void {
+        self.history.deinit();
+    }
+
+    /// Record a performance snapshot
+    pub fn record(self: *PerformanceReporter, snapshot: PerformanceSnapshot) !void {
+        try self.history.append(snapshot);
+
+        // Prune old snapshots
+        while (self.history.items.len > self.max_history) {
+            _ = self.history.orderedRemove(0);
+        }
+    }
+
+    /// Generate performance report
+    pub fn generateReport(self: *PerformanceReporter, allocator: Allocator) ![]u8 {
+        var output = std.ArrayList(u8).init(allocator);
+        const writer = output.writer();
+
+        try writer.print("# ML Model Performance Report\n\n", .{});
+        try writer.print("Generated: {d}\n\n", .{std.time.timestamp()});
+
+        if (self.history.items.len == 0) {
+            try writer.print("No performance data available.\n", .{});
+            return output.toOwnedSlice();
+        }
+
+        // Summary statistics
+        var total_accuracy: f64 = 0;
+        var total_f1: f64 = 0;
+        var total_latency: f64 = 0;
+
+        for (self.history.items) |snapshot| {
+            total_accuracy += snapshot.accuracy;
+            total_f1 += snapshot.f1_score;
+            total_latency += snapshot.avg_latency_ms;
+        }
+
+        const count: f64 = @floatFromInt(self.history.items.len);
+        try writer.print("## Summary\n\n", .{});
+        try writer.print("- Average Accuracy: {d:.2}%\n", .{total_accuracy / count * 100});
+        try writer.print("- Average F1 Score: {d:.4}\n", .{total_f1 / count});
+        try writer.print("- Average Latency: {d:.2}ms\n", .{total_latency / count});
+        try writer.print("- Data Points: {d}\n\n", .{self.history.items.len});
+
+        // Latest snapshot
+        const latest = self.history.items[self.history.items.len - 1];
+        try writer.print("## Latest Snapshot\n\n", .{});
+        try writer.print("- Model Version: {d}\n", .{latest.model_version});
+        try writer.print("- Accuracy: {d:.2}%\n", .{latest.accuracy * 100});
+        try writer.print("- Precision: {d:.2}%\n", .{latest.precision * 100});
+        try writer.print("- Recall: {d:.2}%\n", .{latest.recall * 100});
+        try writer.print("- F1 Score: {d:.4}\n", .{latest.f1_score});
+        try writer.print("- Samples Evaluated: {d}\n", .{latest.samples_evaluated});
+
+        return output.toOwnedSlice();
+    }
+
+    /// Get trend (improvement or degradation)
+    pub fn getTrend(self: *PerformanceReporter) ?Trend {
+        if (self.history.items.len < 2) return null;
+
+        const recent = self.history.items[self.history.items.len - 1];
+        const previous = self.history.items[self.history.items.len - 2];
+
+        const accuracy_change = recent.accuracy - previous.accuracy;
+        const f1_change = recent.f1_score - previous.f1_score;
+
+        return .{
+            .accuracy_change = accuracy_change,
+            .f1_change = f1_change,
+            .direction = if (accuracy_change > 0.01) .improving else if (accuracy_change < -0.01) .degrading else .stable,
+        };
+    }
+
+    pub const Trend = struct {
+        accuracy_change: f64,
+        f1_change: f64,
+        direction: enum { improving, degrading, stable },
+    };
+};
+
+// =============================================================================
+// Additional Tests
+// =============================================================================
+
+test "training dataset split" {
+    const allocator = std.testing.allocator;
+
+    var dataset = TrainingDataset.init(allocator);
+    defer dataset.deinit();
+
+    // Add 10 samples
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        const message = EmailMessage{
+            .subject = "test",
+            .body = "test body",
+            .sender = "test@test.com",
+            .sender_domain = "test.com",
+            .recipients = &[_][]const u8{},
+            .recipient_count = 1,
+            .headers = &[_]EmailMessage.Header{},
+            .has_precedence_bulk = false,
+            .has_list_unsubscribe = false,
+            .size = 100,
+        };
+        try dataset.addSample(message, if (i % 2 == 0) .spam else .not_spam, .manual_label);
+    }
+
+    const split = try dataset.split(0.8);
+    try std.testing.expectEqual(@as(usize, 8), split.train.len);
+    try std.testing.expectEqual(@as(usize, 2), split.validation.len);
+}
+
+test "cross validation result json" {
+    const allocator = std.testing.allocator;
+
+    const result = CrossValidator.CrossValidationResult{
+        .accuracy = 0.95,
+        .precision = 0.92,
+        .recall = 0.98,
+        .f1_score = 0.95,
+        .true_positives = 98,
+        .true_negatives = 92,
+        .false_positives = 8,
+        .false_negatives = 2,
+        .fold_count = 5,
+    };
+
+    const json = try result.toJson(allocator);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "0.95") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "true_positives") != null);
+}
+
+test "training job manager" {
+    const allocator = std.testing.allocator;
+
+    var manager = TrainingJobManager.init(allocator);
+    defer manager.deinit();
+
+    const job_id = try manager.submitJob(.{
+        .dataset_path = "/data/training.csv",
+        .output_model_path = "/models/new_model.bin",
+    });
+
+    try std.testing.expectEqual(@as(u64, 1), job_id);
+
+    const status = manager.getJobStatus(job_id);
+    try std.testing.expect(status != null);
+    try std.testing.expectEqual(TrainingJob.Status.pending, status.?.status);
+}
