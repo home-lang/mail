@@ -388,7 +388,7 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 - [x] Request/response schemas for all operations
 
 **Remaining (optional):**
-- [ ] Generate API client SDKs
+- [x] Generate API client SDKs (TypeScript, Python, Go, Rust, cURL)
 
 ### 27b. ~~Swagger UI Integration~~ ✅ COMPLETED
 **Status:** ✅ Fully implemented
@@ -773,8 +773,8 @@ This document outlines remaining tasks, improvements, and fixes for the SMTP ser
 | 🏢 Enterprise | 9 | 9 | 0 |
 | 🐛 Fixes | 4 | 4 | 0 |
 
-**Completed:** 55 items
-**Remaining:** 1 optional item (API client SDK generation)
+**Completed:** 55 items + 1 optional item
+**Remaining:** 0 items (all tasks complete)
 
 ---
 
@@ -819,8 +819,10 @@ The SMTP server project is now feature-complete with all planned items implement
    - Multi-region support
    - Comprehensive audit trail
 
-### Optional Remaining Item
-- [ ] Generate API client SDKs (TypeScript, Python, Go, etc.)
+### ✅ Optional Item Completed
+- [x] Generate API client SDKs (TypeScript, Python, Go, Rust, cURL)
+  - Location: `src/tools/sdk_generator.zig`
+  - Full SDK templates with type definitions, API clients, and usage examples
 
 ---
 
