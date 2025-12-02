@@ -2,6 +2,53 @@
 
 ## Recent Updates 📝
 
+### v0.35.0 (2025-12-02) - Inline Image Support 🖼️
+- ✅ **Inline Image System**: Complete CID-based inline image handling (`src/features/inline_images.zig`)
+  - **Content-ID Parsing**:
+    - `parseContentId()` - Strip angle brackets and whitespace
+    - `generateContentId()` - Create unique CIDs for new images
+    - MIME multipart parsing for inline attachments
+  - **InlineImageStore**:
+    - Store attachments by Content-ID
+    - Track images by message ID
+    - Base64 encoding with pre-encode option
+    - SHA-256 content hashing
+    - Configurable max size (default 10MB)
+    - Allowed MIME type validation
+  - **CID URL Resolution**:
+    - `resolveHtml()` - Replace cid: URLs with data URIs
+    - Automatic detection and replacement in HTML bodies
+    - Support for quoted and unquoted CID references
+  - **Data URI Generation**:
+    - `toDataUri()` - Convert image to data:mime;base64 format
+    - `createInlineImgTag()` - Generate complete img tags
+  - **Webmail Integration** (`src/api/webmail.zig`):
+    - `GET /webmail/api/inline/:cid` - Get image by Content-ID
+    - `GET /webmail/api/inline-stats` - Storage statistics
+    - `POST /webmail/api/inline` - Upload inline image
+    - `resolveInlineImages()` - Process email HTML
+    - `storeInlineImage()` - Store from MIME part
+  - **Compose UI Features**:
+    - "Image" button in compose toolbar with icon
+    - Insert Image modal with drag-and-drop zone
+    - File picker for local images
+    - URL input for external images
+    - Image preview thumbnails with remove button
+    - Clipboard paste support for images
+    - Automatic insertion at cursor position
+  - **CSS Styling**:
+    - `.inline-image-container` - Thumbnail with remove button
+    - `.insert-image-modal` - Upload dialog
+    - `.image-upload-zone` - Drag-and-drop area with hover state
+    - Responsive image display in email body
+  - **JavaScript Functions**:
+    - `openInsertImage()` / `closeInsertImage()` - Modal control
+    - `processImageFile()` - FileReader with validation
+    - `insertImageAtCursor()` - Cursor-aware insertion
+    - `handleImageDrop()` - Drag-and-drop handler
+    - Paste event listener for clipboard images
+  - **Tests**: 5 unit tests for CID parsing and storage
+
 ### v0.34.0 (2025-12-02) - Email Thread/Conversation View 💬
 - ✅ **Email Thread System**: Complete threading implementation (`src/features/email_threads.zig`)
   - **Threading Algorithm** (JWZ/RFC 5256):
@@ -2007,7 +2054,7 @@ All research topics have been thoroughly investigated and documented in **docs/R
 ## Project Information
 
 **Last Updated**: 2025-12-02
-**Current Version**: v0.34.0
+**Current Version**: v0.35.0
 **Zig Version**: 0.15.1
 **License**: MIT
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const version_info = @import("../core/version.zig");
 const attachment_storage = @import("../storage/attachment_storage.zig");
 const email_threads = @import("../features/email_threads.zig");
+const inline_images = @import("../features/inline_images.zig");
 
 // =============================================================================
 // Webmail Client - Responsive Web Interface for Email
@@ -229,6 +230,7 @@ pub const WebmailHandler = struct {
     sessions: std.StringHashMap(*WebmailSession),
     attachment_store: ?attachment_storage.AttachmentStorage,
     thread_manager: email_threads.ThreadManager,
+    inline_store: inline_images.InlineImageStore,
 
     pub fn init(allocator: std.mem.Allocator, config: WebmailConfig) WebmailHandler {
         // Initialize attachment storage
@@ -245,6 +247,7 @@ pub const WebmailHandler = struct {
             .sessions = std.StringHashMap(*WebmailSession).init(allocator),
             .attachment_store = store,
             .thread_manager = email_threads.ThreadManager.init(allocator, .{}),
+            .inline_store = inline_images.InlineImageStore.init(allocator, .{}),
         };
     }
 
@@ -261,6 +264,7 @@ pub const WebmailHandler = struct {
         }
 
         self.thread_manager.deinit();
+        self.inline_store.deinit();
     }
 
     /// Handle HTTP request
@@ -302,6 +306,10 @@ pub const WebmailHandler = struct {
             return self.getThreads();
         } else if (std.mem.startsWith(u8, endpoint, "threads/")) {
             return self.getThread(endpoint[8..]);
+        } else if (std.mem.startsWith(u8, endpoint, "inline/")) {
+            return self.getInlineImage(endpoint[7..]);
+        } else if (std.mem.eql(u8, endpoint, "inline-stats")) {
+            return self.getInlineStats();
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -315,6 +323,8 @@ pub const WebmailHandler = struct {
             return self.uploadAttachment();
         } else if (std.mem.startsWith(u8, endpoint, "attachments/")) {
             return self.deleteAttachment(endpoint[12..]);
+        } else if (std.mem.eql(u8, endpoint, "inline")) {
+            return self.uploadInlineImage();
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -420,6 +430,102 @@ pub const WebmailHandler = struct {
     /// Get thread containing a specific message
     pub fn getThreadByMessage(self: *WebmailHandler, message_id: []const u8) ?*email_threads.EmailThread {
         return self.thread_manager.getThreadByMessageId(message_id);
+    }
+
+    /// Get inline image by Content-ID
+    fn getInlineImage(self: *WebmailHandler, content_id: []const u8) ![]u8 {
+        if (self.inline_store.get(content_id)) |att| {
+            // Return the image with proper content type
+            const data_uri = att.toDataUri(self.allocator) catch {
+                return self.serveError(500, "Failed to encode image");
+            };
+            defer self.allocator.free(data_uri);
+
+            return std.fmt.allocPrint(self.allocator,
+                \\HTTP/1.1 200 OK
+                \\Content-Type: application/json
+                \\
+                \\{{
+                \\  "content_id": "{s}",
+                \\  "filename": "{s}",
+                \\  "mime_type": "{s}",
+                \\  "size": {d},
+                \\  "data_uri": "{s}"
+                \\}}
+            , .{ content_id, att.filename, att.mime_type, att.size, data_uri });
+        }
+
+        return self.serveError(404, "Inline image not found");
+    }
+
+    /// Get inline image statistics
+    fn getInlineStats(self: *WebmailHandler) ![]u8 {
+        const stats = self.inline_store.getStats();
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{
+            \\  "total_attachments": {d},
+            \\  "total_images": {d},
+            \\  "total_size": {d},
+            \\  "message_count": {d}
+            \\}}
+        , .{ stats.total_attachments, stats.total_images, stats.total_size, stats.message_count });
+    }
+
+    /// Upload an inline image
+    fn uploadInlineImage(self: *WebmailHandler) ![]u8 {
+        // Generate Content-ID
+        const content_id = inline_images.generateContentId(self.allocator, "webmail.local") catch {
+            return self.serveError(500, "Failed to generate Content-ID");
+        };
+        defer self.allocator.free(content_id);
+
+        // Demo: store a placeholder image
+        const demo_data = "\x89PNG\r\n\x1a\n"; // PNG magic bytes
+        self.inline_store.store(
+            content_id,
+            "inline_image.png",
+            "image/png",
+            demo_data,
+            null,
+        ) catch |err| {
+            return switch (err) {
+                inline_images.InlineImageError.DataTooLarge => self.serveError(413, "Image too large"),
+                inline_images.InlineImageError.InvalidMimeType => self.serveError(415, "Invalid image type"),
+                else => self.serveError(500, "Failed to store image"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{
+            \\  "content_id": "{s}",
+            \\  "cid_url": "cid:{s}",
+            \\  "status": "uploaded"
+            \\}}
+        , .{ content_id, content_id });
+    }
+
+    /// Resolve CID references in HTML body
+    pub fn resolveInlineImages(self: *WebmailHandler, html: []const u8) ![]u8 {
+        return self.inline_store.resolveHtml(html);
+    }
+
+    /// Store inline image from MIME part
+    pub fn storeInlineImage(
+        self: *WebmailHandler,
+        content_id: []const u8,
+        filename: []const u8,
+        mime_type: []const u8,
+        data: []const u8,
+        message_id: ?[]const u8,
+    ) !void {
+        try self.inline_store.store(content_id, filename, mime_type, data, message_id);
     }
 
     /// Upload an attachment
@@ -1522,6 +1628,118 @@ const webmail_html =
     \\            gap: 8px;
     \\            margin-top: 12px;
     \\        }
+    \\        /* Inline Image Support */
+    \\        .email-body img {
+    \\            max-width: 100%;
+    \\            height: auto;
+    \\            border-radius: 4px;
+    \\            margin: 8px 0;
+    \\        }
+    \\        .inline-image-container {
+    \\            position: relative;
+    \\            display: inline-block;
+    \\            margin: 4px;
+    \\        }
+    \\        .inline-image-container img {
+    \\            max-width: 200px;
+    \\            max-height: 150px;
+    \\            border-radius: 4px;
+    \\            border: 1px solid var(--border);
+    \\        }
+    \\        .inline-image-container .remove-btn {
+    \\            position: absolute;
+    \\            top: -8px;
+    \\            right: -8px;
+    \\            width: 20px;
+    \\            height: 20px;
+    \\            background: var(--danger);
+    \\            color: white;
+    \\            border: none;
+    \\            border-radius: 50%;
+    \\            cursor: pointer;
+    \\            display: flex;
+    \\            align-items: center;
+    \\            justify-content: center;
+    \\            font-size: 12px;
+    \\        }
+    \\        .inline-images-preview {
+    \\            display: flex;
+    \\            flex-wrap: wrap;
+    \\            gap: 8px;
+    \\            margin-top: 8px;
+    \\            padding: 8px;
+    \\            background: var(--bg);
+    \\            border-radius: 6px;
+    \\            min-height: 40px;
+    \\        }
+    \\        .inline-images-preview:empty {
+    \\            display: none;
+    \\        }
+    \\        .insert-image-modal {
+    \\            display: none;
+    \\            position: fixed;
+    \\            top: 50%;
+    \\            left: 50%;
+    \\            transform: translate(-50%, -50%);
+    \\            background: var(--card-bg);
+    \\            border-radius: 12px;
+    \\            box-shadow: var(--shadow-lg);
+    \\            padding: 20px;
+    \\            z-index: 400;
+    \\            width: 400px;
+    \\            max-width: 90vw;
+    \\        }
+    \\        .insert-image-modal.open { display: block; }
+    \\        .insert-image-modal h3 {
+    \\            margin: 0 0 16px;
+    \\            font-size: 1.1rem;
+    \\        }
+    \\        .image-upload-zone {
+    \\            border: 2px dashed var(--border);
+    \\            border-radius: 8px;
+    \\            padding: 24px;
+    \\            text-align: center;
+    \\            cursor: pointer;
+    \\            transition: all 0.2s;
+    \\        }
+    \\        .image-upload-zone:hover {
+    \\            border-color: var(--primary);
+    \\            background: var(--primary-light);
+    \\        }
+    \\        .image-upload-zone.dragover {
+    \\            border-color: var(--primary);
+    \\            background: var(--primary-light);
+    \\        }
+    \\        .image-upload-zone svg {
+    \\            width: 48px;
+    \\            height: 48px;
+    \\            color: var(--text-muted);
+    \\            margin-bottom: 8px;
+    \\        }
+    \\        .image-url-input {
+    \\            margin-top: 16px;
+    \\        }
+    \\        .image-url-input label {
+    \\            display: block;
+    \\            font-size: 0.875rem;
+    \\            color: var(--text-muted);
+    \\            margin-bottom: 4px;
+    \\        }
+    \\        .image-url-input input {
+    \\            width: 100%;
+    \\            padding: 8px 12px;
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 6px;
+    \\            font-size: 0.875rem;
+    \\            background: var(--bg);
+    \\            color: var(--text);
+    \\        }
+    \\        .insert-image-actions {
+    \\            display: flex;
+    \\            justify-content: flex-end;
+    \\            gap: 8px;
+    \\            margin-top: 16px;
+    \\        }
     \\    </style>
     \\</head>
     \\<body>
@@ -1817,8 +2035,15 @@ const webmail_html =
     \\                    <button class="toolbar-btn" onclick="formatText('underline')" title="Underline"><u>U</u></button>
     \\                    <button class="toolbar-btn" onclick="formatText('strikethrough')" title="Strikethrough"><s>S</s></button>
     \\                    <button class="toolbar-btn" onclick="insertLink()" title="Insert link">Link</button>
+    \\                    <button class="toolbar-btn" onclick="openInsertImage()" title="Insert inline image">
+    \\                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
+    \\                        </svg>
+    \\                        Image
+    \\                    </button>
     \\                    <button class="toolbar-btn" onclick="attachFile()" title="Attach file">Attach</button>
     \\                </div>
+    \\                <div id="inline-images-preview" class="inline-images-preview"></div>
     \\                <div id="attachment-list" class="attachment-list"></div>
     \\                <textarea class="compose-editor" id="compose-body" placeholder="Write your message..."></textarea>
     \\            </div>
@@ -1864,6 +2089,28 @@ const webmail_html =
     \\            </div>
     \\        </div>
     \\        <div class="contacts-list" id="contacts-list"></div>
+    \\    </div>
+    \\    <!-- Insert Image Modal -->
+    \\    <div class="insert-image-modal" id="insert-image-modal">
+    \\        <h3>Insert Image</h3>
+    \\        <div class="image-upload-zone" id="image-upload-zone" onclick="triggerImageUpload()" ondragover="handleImageDragOver(event)" ondragleave="handleImageDragLeave(event)" ondrop="handleImageDrop(event)">
+    \\            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    \\                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+    \\                <circle cx="8.5" cy="8.5" r="1.5"/>
+    \\                <polyline points="21 15 16 10 5 21"/>
+    \\            </svg>
+    \\            <div>Click or drag image here</div>
+    \\            <div style="font-size: 0.75rem; color: var(--text-muted);">PNG, JPG, GIF, WebP (max 10MB)</div>
+    \\        </div>
+    \\        <input type="file" id="image-file-input" accept="image/*" style="display: none" onchange="handleImageSelect(event)">
+    \\        <div class="image-url-input">
+    \\            <label>Or paste image URL:</label>
+    \\            <input type="text" id="image-url" placeholder="https://example.com/image.png">
+    \\        </div>
+    \\        <div class="insert-image-actions">
+    \\            <button class="draft-btn" onclick="closeInsertImage()">Cancel</button>
+    \\            <button class="send-btn" onclick="insertImageFromUrl()">Insert</button>
+    \\        </div>
     \\    </div>
     \\    <!-- Toast Container -->
     \\    <div class="toast-container" id="toast-container"></div>
@@ -2549,6 +2796,190 @@ const webmail_html =
     \\            closeThread();
     \\            showToast('Thread deleted', 'success');
     \\        }
+    \\
+    \\        // =============================================
+    \\        // Inline Image Functions
+    \\        // =============================================
+    \\        let inlineImages = [];
+    \\        const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+    \\        const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+    \\
+    \\        function openInsertImage() {
+    \\            document.getElementById('insert-image-modal').classList.add('open');
+    \\            document.getElementById('image-url').value = '';
+    \\        }
+    \\
+    \\        function closeInsertImage() {
+    \\            document.getElementById('insert-image-modal').classList.remove('open');
+    \\        }
+    \\
+    \\        function triggerImageUpload() {
+    \\            document.getElementById('image-file-input').click();
+    \\        }
+    \\
+    \\        function handleImageDragOver(e) {
+    \\            e.preventDefault();
+    \\            e.stopPropagation();
+    \\            document.getElementById('image-upload-zone').classList.add('dragover');
+    \\        }
+    \\
+    \\        function handleImageDragLeave(e) {
+    \\            e.preventDefault();
+    \\            e.stopPropagation();
+    \\            document.getElementById('image-upload-zone').classList.remove('dragover');
+    \\        }
+    \\
+    \\        function handleImageDrop(e) {
+    \\            e.preventDefault();
+    \\            e.stopPropagation();
+    \\            document.getElementById('image-upload-zone').classList.remove('dragover');
+    \\
+    \\            const files = Array.from(e.dataTransfer.files);
+    \\            const imageFile = files.find(f => ALLOWED_IMAGE_TYPES.includes(f.type));
+    \\
+    \\            if (imageFile) {
+    \\                processImageFile(imageFile);
+    \\            } else {
+    \\                showToast('Please drop a valid image file', 'error');
+    \\            }
+    \\        }
+    \\
+    \\        function handleImageSelect(e) {
+    \\            const file = e.target.files[0];
+    \\            if (file) {
+    \\                processImageFile(file);
+    \\            }
+    \\        }
+    \\
+    \\        function processImageFile(file) {
+    \\            if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    \\                showToast('Invalid image type. Use PNG, JPG, GIF, or WebP.', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            if (file.size > MAX_IMAGE_SIZE) {
+    \\                showToast('Image too large. Maximum size is 10MB.', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            const reader = new FileReader();
+    \\            reader.onload = function(e) {
+    \\                const dataUri = e.target.result;
+    \\                const contentId = 'img_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    \\
+    \\                // Add to inline images array
+    \\                inlineImages.push({
+    \\                    id: contentId,
+    \\                    filename: file.name,
+    \\                    type: file.type,
+    \\                    dataUri: dataUri,
+    \\                    size: file.size
+    \\                });
+    \\
+    \\                // Insert into compose body
+    \\                insertImageAtCursor(dataUri, file.name);
+    \\
+    \\                // Update preview
+    \\                renderInlineImagesPreview();
+    \\
+    \\                closeInsertImage();
+    \\                showToast('Image inserted!', 'success');
+    \\            };
+    \\            reader.readAsDataURL(file);
+    \\        }
+    \\
+    \\        function insertImageFromUrl() {
+    \\            const url = document.getElementById('image-url').value.trim();
+    \\            if (!url) {
+    \\                showToast('Please enter an image URL', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            // Basic URL validation
+    \\            try {
+    \\                new URL(url);
+    \\            } catch {
+    \\                showToast('Invalid URL format', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            const contentId = 'img_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    \\
+    \\            inlineImages.push({
+    \\                id: contentId,
+    \\                filename: url.split('/').pop() || 'image',
+    \\                type: 'image/unknown',
+    \\                dataUri: url,
+    \\                size: 0,
+    \\                isUrl: true
+    \\            });
+    \\
+    \\            insertImageAtCursor(url, 'Inline image');
+    \\            renderInlineImagesPreview();
+    \\
+    \\            closeInsertImage();
+    \\            showToast('Image inserted!', 'success');
+    \\        }
+    \\
+    \\        function insertImageAtCursor(src, alt) {
+    \\            const textarea = document.getElementById('compose-body');
+    \\            const imgTag = '\\n[Image: ' + alt + ']\\n<img src="' + src + '" alt="' + alt + '" style="max-width: 100%;">\\n';
+    \\
+    \\            const start = textarea.selectionStart;
+    \\            const end = textarea.selectionEnd;
+    \\            const text = textarea.value;
+    \\
+    \\            textarea.value = text.substring(0, start) + imgTag + text.substring(end);
+    \\            textarea.selectionStart = textarea.selectionEnd = start + imgTag.length;
+    \\            textarea.focus();
+    \\        }
+    \\
+    \\        function renderInlineImagesPreview() {
+    \\            const container = document.getElementById('inline-images-preview');
+    \\            container.innerHTML = inlineImages.map((img, idx) => `
+    \\                <div class="inline-image-container">
+    \\                    <img src="${img.dataUri}" alt="${img.filename}" title="${img.filename}">
+    \\                    <button class="remove-btn" onclick="removeInlineImage(${idx})" title="Remove">×</button>
+    \\                </div>
+    \\            `).join('');
+    \\        }
+    \\
+    \\        function removeInlineImage(index) {
+    \\            const removed = inlineImages.splice(index, 1)[0];
+    \\            renderInlineImagesPreview();
+    \\
+    \\            // Note: We don't remove from textarea as user may have edited it
+    \\            showToast('Image removed from list', 'success');
+    \\        }
+    \\
+    \\        function clearInlineImages() {
+    \\            inlineImages = [];
+    \\            renderInlineImagesPreview();
+    \\        }
+    \\
+    \\        // Extend closeCompose to clear inline images
+    \\        const originalCloseCompose = closeCompose;
+    \\        closeCompose = function() {
+    \\            clearInlineImages();
+    \\            originalCloseCompose();
+    \\        };
+    \\
+    \\        // Handle paste for images
+    \\        document.addEventListener('paste', function(e) {
+    \\            const composeModal = document.getElementById('compose-modal');
+    \\            if (!composeModal.classList.contains('open')) return;
+    \\
+    \\            const items = Array.from(e.clipboardData.items);
+    \\            const imageItem = items.find(item => item.type.startsWith('image/'));
+    \\
+    \\            if (imageItem) {
+    \\                e.preventDefault();
+    \\                const file = imageItem.getAsFile();
+    \\                if (file) {
+    \\                    processImageFile(file);
+    \\                }
+    \\            }
+    \\        });
     \\
     \\        function showToast(message, type) {
     \\            const container = document.getElementById('toast-container');
