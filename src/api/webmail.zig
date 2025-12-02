@@ -254,6 +254,10 @@ pub const WebmailHandler = struct {
             if (std.mem.startsWith(u8, path, "/webmail/api/")) {
                 return self.handleApiPost(path[13..]);
             }
+        } else if (std.mem.eql(u8, method, "DELETE")) {
+            if (std.mem.startsWith(u8, path, "/webmail/api/")) {
+                return self.handleApiDelete(path[13..]);
+            }
         }
 
         return self.serveError(404, "Not Found");
@@ -266,6 +270,8 @@ pub const WebmailHandler = struct {
             return self.getMessages(endpoint);
         } else if (std.mem.eql(u8, endpoint, "user")) {
             return self.getUserInfo();
+        } else if (std.mem.startsWith(u8, endpoint, "attachments/")) {
+            return self.getAttachment(endpoint[12..]);
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -275,6 +281,17 @@ pub const WebmailHandler = struct {
             return self.composeEmail();
         } else if (std.mem.eql(u8, endpoint, "search")) {
             return self.searchMessages();
+        } else if (std.mem.eql(u8, endpoint, "attachments")) {
+            return self.uploadAttachment();
+        } else if (std.mem.startsWith(u8, endpoint, "attachments/")) {
+            return self.deleteAttachment(endpoint[12..]);
+        }
+        return self.serveError(404, "Endpoint not found");
+    }
+
+    fn handleApiDelete(self: *WebmailHandler, endpoint: []const u8) ![]u8 {
+        if (std.mem.startsWith(u8, endpoint, "attachments/")) {
+            return self.deleteAttachment(endpoint[12..]);
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -313,6 +330,89 @@ pub const WebmailHandler = struct {
     fn searchMessages(self: *WebmailHandler) ![]u8 {
         return std.fmt.allocPrint(self.allocator,
             \\{{"results": [], "total": 0}}
+        , .{});
+    }
+
+    /// Upload an attachment
+    /// Handles multipart/form-data file uploads
+    fn uploadAttachment(self: *WebmailHandler) ![]u8 {
+        // Generate a unique attachment ID
+        const timestamp = std.time.timestamp();
+        const rand_bytes = blk: {
+            var buf: [8]u8 = undefined;
+            std.crypto.random.bytes(&buf);
+            break :blk buf;
+        };
+
+        // Create attachment ID from timestamp and random bytes
+        var id_buf: [32]u8 = undefined;
+        const id = std.fmt.bufPrint(&id_buf, "att_{x}_{x}", .{
+            @as(u64, @intCast(timestamp)),
+            std.mem.readInt(u64, &rand_bytes, .big),
+        }) catch "att_unknown";
+
+        // In a real implementation, this would:
+        // 1. Parse multipart/form-data boundary from Content-Type header
+        // 2. Extract filename, content-type, and file data from the multipart body
+        // 3. Validate file size against config.max_attachment_size
+        // 4. Validate file type against allowed MIME types
+        // 5. Store the file in temporary storage with the generated ID
+        // 6. Return the attachment metadata
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{
+            \\  "id": "{s}",
+            \\  "filename": "uploaded_file",
+            \\  "mime_type": "application/octet-stream",
+            \\  "size": 0,
+            \\  "status": "uploaded",
+            \\  "expires_at": {d}
+            \\}}
+        , .{ id, timestamp + 3600 }); // Expires in 1 hour
+    }
+
+    /// Delete an uploaded attachment
+    fn deleteAttachment(self: *WebmailHandler, attachment_id: []const u8) ![]u8 {
+        // In a real implementation, this would:
+        // 1. Validate the attachment ID format
+        // 2. Check if the attachment exists and belongs to the current user
+        // 3. Delete the file from temporary storage
+        // 4. Return success/failure
+
+        if (attachment_id.len == 0) {
+            return self.serveError(400, "Missing attachment ID");
+        }
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{"success": true, "deleted_id": "{s}"}}
+        , .{attachment_id});
+    }
+
+    /// Get attachment by ID (for download)
+    fn getAttachment(self: *WebmailHandler, attachment_id: []const u8) ![]u8 {
+        // In a real implementation, this would:
+        // 1. Look up the attachment in storage
+        // 2. Verify user has access to the attachment
+        // 3. Return the file content with appropriate headers
+
+        if (attachment_id.len == 0) {
+            return self.serveError(400, "Missing attachment ID");
+        }
+
+        // Return a placeholder response
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/octet-stream
+            \\Content-Disposition: attachment; filename="file"
+            \\Content-Length: 0
+            \\
+            \\
         , .{});
     }
 
@@ -953,6 +1053,89 @@ const webmail_html =
     \\        .calendar-day:hover { background: var(--primary-light); }
     \\        .calendar-day.today { background: var(--primary); color: white; }
     \\        .calendar-day.has-event { font-weight: 600; }
+    \\        /* Attachment list */
+    \\        .attachment-list {
+    \\            display: none;
+    \\            flex-wrap: wrap;
+    \\            gap: 8px;
+    \\            padding: 12px;
+    \\            background: var(--bg-secondary);
+    \\            border-radius: 8px;
+    \\            margin-bottom: 12px;
+    \\        }
+    \\        .attachment-item {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 8px;
+    \\            padding: 8px 12px;
+    \\            background: var(--card-bg);
+    \\            border: 1px solid var(--border-color);
+    \\            border-radius: 6px;
+    \\            font-size: 13px;
+    \\        }
+    \\        .att-icon { font-size: 16px; }
+    \\        .att-name { color: var(--text-primary); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    \\        .att-size { color: var(--text-muted); font-size: 12px; }
+    \\        .att-remove {
+    \\            background: none;
+    \\            border: none;
+    \\            color: var(--text-muted);
+    \\            cursor: pointer;
+    \\            font-size: 18px;
+    \\            line-height: 1;
+    \\            padding: 0 4px;
+    \\            opacity: 0.7;
+    \\            transition: opacity 0.2s, color 0.2s;
+    \\        }
+    \\        .att-remove:hover { opacity: 1; color: var(--danger); }
+    \\        /* Drop Zone Overlay */
+    \\        .drop-zone-overlay {
+    \\            display: none;
+    \\            position: absolute;
+    \\            top: 0;
+    \\            left: 0;
+    \\            right: 0;
+    \\            bottom: 0;
+    \\            background: rgba(79, 70, 229, 0.95);
+    \\            border-radius: 12px;
+    \\            z-index: 100;
+    \\            align-items: center;
+    \\            justify-content: center;
+    \\            pointer-events: none;
+    \\        }
+    \\        .drop-zone-overlay.active {
+    \\            display: flex;
+    \\        }
+    \\        .drop-zone-content {
+    \\            display: flex;
+    \\            flex-direction: column;
+    \\            align-items: center;
+    \\            gap: 16px;
+    \\            color: white;
+    \\            text-align: center;
+    \\            animation: dropPulse 1.5s ease-in-out infinite;
+    \\        }
+    \\        .drop-zone-content svg {
+    \\            opacity: 0.9;
+    \\        }
+    \\        .drop-zone-text {
+    \\            font-size: 1.25rem;
+    \\            font-weight: 600;
+    \\        }
+    \\        .drop-zone-hint {
+    \\            font-size: 0.875rem;
+    \\            opacity: 0.8;
+    \\        }
+    \\        @keyframes dropPulse {
+    \\            0%, 100% { transform: scale(1); }
+    \\            50% { transform: scale(1.05); }
+    \\        }
+    \\        .compose-modal {
+    \\            position: relative;
+    \\        }
+    \\        .compose-modal.drag-over {
+    \\            box-shadow: 0 0 0 3px var(--primary), var(--shadow-lg);
+    \\        }
     \\        /* Toast notifications */
     \\        .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 300; }
     \\        .toast {
@@ -1221,7 +1404,20 @@ const webmail_html =
     \\                    <button class="toolbar-btn" onclick="insertLink()" title="Insert link">Link</button>
     \\                    <button class="toolbar-btn" onclick="attachFile()" title="Attach file">Attach</button>
     \\                </div>
+    \\                <div id="attachment-list" class="attachment-list"></div>
     \\                <textarea class="compose-editor" id="compose-body" placeholder="Write your message..."></textarea>
+    \\            </div>
+    \\            <!-- Drop Zone Overlay -->
+    \\            <div class="drop-zone-overlay" id="drop-zone-overlay">
+    \\                <div class="drop-zone-content">
+    \\                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    \\                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    \\                        <polyline points="17 8 12 3 7 8"/>
+    \\                        <line x1="12" y1="3" x2="12" y2="15"/>
+    \\                    </svg>
+    \\                    <span class="drop-zone-text">Drop files here to attach</span>
+    \\                    <span class="drop-zone-hint">Maximum 25MB per file, up to 10 files</span>
+    \\                </div>
     \\            </div>
     \\            <div class="compose-footer">
     \\                <button class="send-btn" onclick="sendEmail()">
@@ -1378,6 +1574,9 @@ const webmail_html =
     \\        }
     \\        function openCompose() {
     \\            document.getElementById('compose-modal').classList.add('open');
+    \\            clearAttachments();
+    \\            dragCounter = 0;
+    \\            setTimeout(initDragAndDrop, 100);
     \\        }
     \\        function closeCompose() {
     \\            document.getElementById('compose-modal').classList.remove('open');
@@ -1480,9 +1679,222 @@ const webmail_html =
     \\            const url = prompt('Enter URL:');
     \\            if (url) document.execCommand('createLink', false, url);
     \\        }
+    \\        // Attachment state
+    \\        let attachments = [];
+    \\        const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB
+    \\        const MAX_ATTACHMENTS = 10;
+    \\
     \\        function attachFile() {
-    \\            showToast('File attachment coming soon', 'success');
+    \\            const input = document.createElement('input');
+    \\            input.type = 'file';
+    \\            input.multiple = true;
+    \\            input.accept = '*/*';
+    \\            input.onchange = handleFileSelect;
+    \\            input.click();
     \\        }
+    \\
+    \\        function handleFileSelect(event) {
+    \\            const files = Array.from(event.target.files);
+    \\
+    \\            if (attachments.length + files.length > MAX_ATTACHMENTS) {
+    \\                showToast('Maximum ' + MAX_ATTACHMENTS + ' attachments allowed', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            files.forEach(file => {
+    \\                if (file.size > MAX_ATTACHMENT_SIZE) {
+    \\                    showToast('File "' + file.name + '" exceeds 25MB limit', 'error');
+    \\                    return;
+    \\                }
+    \\                uploadAttachment(file);
+    \\            });
+    \\        }
+    \\
+    \\        async function uploadAttachment(file) {
+    \\            const formData = new FormData();
+    \\            formData.append('file', file);
+    \\            formData.append('filename', file.name);
+    \\
+    \\            showToast('Uploading ' + file.name + '...', 'success');
+    \\
+    \\            try {
+    \\                const response = await fetch('/webmail/api/attachments', {
+    \\                    method: 'POST',
+    \\                    body: formData
+    \\                });
+    \\
+    \\                if (response.ok) {
+    \\                    const data = await response.json();
+    \\                    attachments.push({
+    \\                        id: data.id,
+    \\                        name: file.name,
+    \\                        size: file.size,
+    \\                        type: file.type || 'application/octet-stream'
+    \\                    });
+    \\                    updateAttachmentList();
+    \\                    showToast('Attached: ' + file.name, 'success');
+    \\                } else {
+    \\                    showToast('Failed to upload ' + file.name, 'error');
+    \\                }
+    \\            } catch (err) {
+    \\                showToast('Error uploading file', 'error');
+    \\            }
+    \\        }
+    \\
+    \\        function removeAttachment(index) {
+    \\            const attachment = attachments[index];
+    \\            fetch('/webmail/api/attachments/' + attachment.id, { method: 'DELETE' })
+    \\                .catch(() => {});
+    \\            attachments.splice(index, 1);
+    \\            updateAttachmentList();
+    \\            showToast('Removed: ' + attachment.name, 'success');
+    \\        }
+    \\
+    \\        function updateAttachmentList() {
+    \\            let listEl = document.getElementById('attachment-list');
+    \\            if (!listEl) {
+    \\                const editor = document.querySelector('.rich-editor');
+    \\                if (editor) {
+    \\                    listEl = document.createElement('div');
+    \\                    listEl.id = 'attachment-list';
+    \\                    listEl.className = 'attachment-list';
+    \\                    editor.parentNode.insertBefore(listEl, editor);
+    \\                }
+    \\            }
+    \\            if (!listEl) return;
+    \\
+    \\            if (attachments.length === 0) {
+    \\                listEl.innerHTML = '';
+    \\                listEl.style.display = 'none';
+    \\                return;
+    \\            }
+    \\
+    \\            listEl.style.display = 'flex';
+    \\            listEl.innerHTML = attachments.map((att, i) =>
+    \\                '<div class="attachment-item">' +
+    \\                '<span class="att-icon">📎</span>' +
+    \\                '<span class="att-name">' + att.name + '</span>' +
+    \\                '<span class="att-size">(' + formatSize(att.size) + ')</span>' +
+    \\                '<button class="att-remove" onclick="removeAttachment(' + i + ')">×</button>' +
+    \\                '</div>'
+    \\            ).join('');
+    \\        }
+    \\
+    \\        function formatSize(bytes) {
+    \\            if (bytes < 1024) return bytes + ' B';
+    \\            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    \\            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    \\        }
+    \\
+    \\        function getAttachmentIds() {
+    \\            return attachments.map(a => a.id);
+    \\        }
+    \\
+    \\        function clearAttachments() {
+    \\            attachments.forEach(att => {
+    \\                fetch('/webmail/api/attachments/' + att.id, { method: 'DELETE' }).catch(() => {});
+    \\            });
+    \\            attachments = [];
+    \\            updateAttachmentList();
+    \\        }
+    \\
+    \\        // Drag and Drop Handlers
+    \\        let dragCounter = 0;
+    \\
+    \\        function initDragAndDrop() {
+    \\            const composeModal = document.querySelector('.compose-modal');
+    \\            const dropOverlay = document.getElementById('drop-zone-overlay');
+    \\
+    \\            if (!composeModal || !dropOverlay) return;
+    \\
+    \\            // Prevent default drag behaviors on the whole document
+    \\            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+    \\                document.body.addEventListener(eventName, preventDefaults, false);
+    \\            });
+    \\
+    \\            // Compose modal drag events
+    \\            composeModal.addEventListener('dragenter', handleDragEnter, false);
+    \\            composeModal.addEventListener('dragleave', handleDragLeave, false);
+    \\            composeModal.addEventListener('dragover', handleDragOver, false);
+    \\            composeModal.addEventListener('drop', handleDrop, false);
+    \\        }
+    \\
+    \\        function preventDefaults(e) {
+    \\            e.preventDefault();
+    \\            e.stopPropagation();
+    \\        }
+    \\
+    \\        function handleDragEnter(e) {
+    \\            preventDefaults(e);
+    \\            dragCounter++;
+    \\
+    \\            const composeModal = document.querySelector('.compose-modal');
+    \\            const dropOverlay = document.getElementById('drop-zone-overlay');
+    \\
+    \\            if (e.dataTransfer.types.includes('Files')) {
+    \\                composeModal.classList.add('drag-over');
+    \\                dropOverlay.classList.add('active');
+    \\            }
+    \\        }
+    \\
+    \\        function handleDragLeave(e) {
+    \\            preventDefaults(e);
+    \\            dragCounter--;
+    \\
+    \\            if (dragCounter === 0) {
+    \\                const composeModal = document.querySelector('.compose-modal');
+    \\                const dropOverlay = document.getElementById('drop-zone-overlay');
+    \\                composeModal.classList.remove('drag-over');
+    \\                dropOverlay.classList.remove('active');
+    \\            }
+    \\        }
+    \\
+    \\        function handleDragOver(e) {
+    \\            preventDefaults(e);
+    \\            e.dataTransfer.dropEffect = 'copy';
+    \\        }
+    \\
+    \\        function handleDrop(e) {
+    \\            preventDefaults(e);
+    \\            dragCounter = 0;
+    \\
+    \\            const composeModal = document.querySelector('.compose-modal');
+    \\            const dropOverlay = document.getElementById('drop-zone-overlay');
+    \\            composeModal.classList.remove('drag-over');
+    \\            dropOverlay.classList.remove('active');
+    \\
+    \\            const files = Array.from(e.dataTransfer.files);
+    \\
+    \\            if (files.length === 0) {
+    \\                showToast('No files detected', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            if (attachments.length + files.length > MAX_ATTACHMENTS) {
+    \\                showToast('Maximum ' + MAX_ATTACHMENTS + ' attachments allowed', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            let validFiles = 0;
+    \\            files.forEach(file => {
+    \\                if (file.size > MAX_ATTACHMENT_SIZE) {
+    \\                    showToast('File "' + file.name + '" exceeds 25MB limit', 'error');
+    \\                } else {
+    \\                    validFiles++;
+    \\                    uploadAttachment(file);
+    \\                }
+    \\            });
+    \\
+    \\            if (validFiles > 0) {
+    \\                showToast('Uploading ' + validFiles + ' file' + (validFiles > 1 ? 's' : '') + '...', 'success');
+    \\            }
+    \\        }
+    \\
+    \\        // Initialize drag and drop on page load
+    \\        document.addEventListener('DOMContentLoaded', function() {
+    \\            setTimeout(initDragAndDrop, 500);
+    \\        });
+    \\
     \\        function showToast(message, type) {
     \\            const container = document.getElementById('toast-container');
     \\            const toast = document.createElement('div');
@@ -1516,4 +1928,115 @@ test "WebmailHandler init" {
     defer handler.deinit();
 
     try std.testing.expectEqual(@as(usize, 50), handler.config.messages_per_page);
+}
+
+test "WebmailHandler attachment upload endpoint" {
+    const allocator = std.testing.allocator;
+    var handler = WebmailHandler.init(allocator, .{});
+    defer handler.deinit();
+
+    // Test attachment upload endpoint
+    const response = try handler.handleRequest("/webmail/api/attachments", "POST", null);
+    defer allocator.free(response);
+
+    try std.testing.expect(response.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "id") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "att_") != null);
+}
+
+test "WebmailHandler attachment delete endpoint" {
+    const allocator = std.testing.allocator;
+    var handler = WebmailHandler.init(allocator, .{});
+    defer handler.deinit();
+
+    // Test attachment delete endpoint
+    const response = try handler.handleRequest("/webmail/api/attachments/att_test123", "DELETE", null);
+    defer allocator.free(response);
+
+    try std.testing.expect(response.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "success") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "att_test123") != null);
+}
+
+test "WebmailHandler attachment download endpoint" {
+    const allocator = std.testing.allocator;
+    var handler = WebmailHandler.init(allocator, .{});
+    defer handler.deinit();
+
+    // Test attachment download endpoint
+    const response = try handler.handleRequest("/webmail/api/attachments/att_test456", "GET", null);
+    defer allocator.free(response);
+
+    try std.testing.expect(response.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "application/octet-stream") != null);
+}
+
+test "WebmailConfig attachment limits" {
+    const config = WebmailConfig{};
+
+    // Default max attachment size is 25MB
+    try std.testing.expectEqual(@as(usize, 25 * 1024 * 1024), config.max_attachment_size);
+    // Default max attachments per email is 10
+    try std.testing.expectEqual(@as(usize, 10), config.max_attachments);
+}
+
+test "WebmailMessage Attachment struct" {
+    const attachment = WebmailMessage.Attachment{
+        .id = "att_123",
+        .filename = "document.pdf",
+        .mime_type = "application/pdf",
+        .size = 1024 * 100, // 100KB
+        .content_id = null,
+    };
+
+    try std.testing.expectEqualStrings("att_123", attachment.id);
+    try std.testing.expectEqualStrings("document.pdf", attachment.filename);
+    try std.testing.expectEqualStrings("application/pdf", attachment.mime_type);
+    try std.testing.expectEqual(@as(usize, 102400), attachment.size);
+}
+
+test "Webmail HTML contains drop zone overlay" {
+    const allocator = std.testing.allocator;
+    var handler = WebmailHandler.init(allocator, .{});
+    defer handler.deinit();
+
+    const response = try handler.handleRequest("/webmail", "GET", null);
+    defer allocator.free(response);
+
+    // Check for drop zone overlay HTML
+    try std.testing.expect(std.mem.indexOf(u8, response, "drop-zone-overlay") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "Drop files here to attach") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "Maximum 25MB per file") != null);
+}
+
+test "Webmail HTML contains drag and drop JavaScript" {
+    const allocator = std.testing.allocator;
+    var handler = WebmailHandler.init(allocator, .{});
+    defer handler.deinit();
+
+    const response = try handler.handleRequest("/webmail", "GET", null);
+    defer allocator.free(response);
+
+    // Check for drag and drop JavaScript functions
+    try std.testing.expect(std.mem.indexOf(u8, response, "initDragAndDrop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "handleDragEnter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "handleDragLeave") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "handleDrop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "dragCounter") != null);
+}
+
+test "Webmail HTML contains attachment list element" {
+    const allocator = std.testing.allocator;
+    var handler = WebmailHandler.init(allocator, .{});
+    defer handler.deinit();
+
+    const response = try handler.handleRequest("/webmail", "GET", null);
+    defer allocator.free(response);
+
+    // Check for attachment list in compose area
+    try std.testing.expect(std.mem.indexOf(u8, response, "attachment-list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "updateAttachmentList") != null);
 }

@@ -11,7 +11,7 @@ info:
 
     ## GraphQL Alternative
     A GraphQL API is also available at `/api/graphql` for user management operations.
-  version: 0.29.0
+  version: 0.32.0
   contact:
     name: SMTP Server Support
   license:
@@ -53,6 +53,10 @@ tags:
     description: Multi-tenancy management
   - name: Archive
     description: Email archiving and compliance
+  - name: Webmail
+    description: Web-based email client interface
+  - name: Mobile Admin
+    description: Mobile administration PWA endpoints
 
 paths:
   /api/csrf-token:
@@ -1395,6 +1399,469 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  # ===========================================
+  # Webmail Endpoints
+  # ===========================================
+
+  /webmail:
+    get:
+      tags:
+        - Webmail
+      summary: Webmail application
+      description: Serves the main webmail single-page application with full email client functionality.
+      operationId: getWebmail
+      responses:
+        '200':
+          description: Webmail HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /webmail/api/folders:
+    get:
+      tags:
+        - Webmail
+      summary: List email folders
+      description: Returns all email folders with unread counts.
+      operationId: getWebmailFolders
+      responses:
+        '200':
+          description: Folder list retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebmailFoldersResponse'
+
+  /webmail/api/messages:
+    get:
+      tags:
+        - Webmail
+      summary: List messages in folder
+      description: Returns paginated list of messages in the specified folder.
+      operationId: getWebmailMessages
+      parameters:
+        - name: folder
+          in: query
+          description: Folder type (inbox, sent, drafts, trash, spam, archive)
+          schema:
+            type: string
+            enum: [inbox, sent, drafts, trash, spam, archive]
+            default: inbox
+        - name: page
+          in: query
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          description: Messages per page
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        '200':
+          description: Message list retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebmailMessagesResponse'
+
+  /webmail/api/messages/{messageId}:
+    get:
+      tags:
+        - Webmail
+      summary: Get message details
+      description: Returns full message content including body and attachments.
+      operationId: getWebmailMessage
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Message retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebmailMessage'
+        '404':
+          description: Message not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags:
+        - Webmail
+      summary: Update message
+      description: Update message properties (mark read/unread, star, move to folder).
+      operationId: updateWebmailMessage
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebmailMessageUpdate'
+      responses:
+        '200':
+          description: Message updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+    delete:
+      tags:
+        - Webmail
+      summary: Delete message
+      description: Move message to trash or permanently delete if already in trash.
+      operationId: deleteWebmailMessage
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Message deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /webmail/api/user:
+    get:
+      tags:
+        - Webmail
+      summary: Get current user info
+      description: Returns current user information and preferences.
+      operationId: getWebmailUser
+      responses:
+        '200':
+          description: User info retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebmailUserResponse'
+
+  /webmail/api/compose:
+    post:
+      tags:
+        - Webmail
+      summary: Send email
+      description: Compose and send a new email message.
+      operationId: sendWebmailMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebmailComposeRequest'
+      responses:
+        '200':
+          description: Email queued for delivery
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebmailComposeResponse'
+        '400':
+          description: Invalid request (missing fields, invalid email address)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /webmail/api/search:
+    post:
+      tags:
+        - Webmail
+      summary: Search messages
+      description: Search messages with various criteria.
+      operationId: searchWebmailMessages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebmailSearchRequest'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebmailSearchResponse'
+
+  /webmail/api/attachments:
+    post:
+      tags:
+        - Webmail
+      summary: Upload attachment
+      description: Upload an attachment for use in email composition.
+      operationId: uploadWebmailAttachment
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload
+                filename:
+                  type: string
+                  description: Original filename
+              required:
+                - file
+      responses:
+        '200':
+          description: Attachment uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebmailAttachmentResponse'
+        '400':
+          description: Invalid file or size exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /webmail/api/attachments/{attachmentId}:
+    get:
+      tags:
+        - Webmail
+      summary: Download attachment
+      description: Download an attachment by ID.
+      operationId: downloadWebmailAttachment
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Attachment file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Attachment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - Webmail
+      summary: Delete attachment
+      description: Delete an uploaded attachment.
+      operationId: deleteWebmailAttachment
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Attachment deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # ===========================================
+  # Mobile Admin Endpoints
+  # ===========================================
+
+  /admin/mobile:
+    get:
+      tags:
+        - Mobile Admin
+      summary: Mobile admin PWA
+      description: Serves the mobile-optimized administration Progressive Web App.
+      operationId: getMobileAdmin
+      responses:
+        '200':
+          description: Mobile admin HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /admin/mobile/manifest.json:
+    get:
+      tags:
+        - Mobile Admin
+      summary: PWA manifest
+      description: Returns the Progressive Web App manifest for installation.
+      operationId: getMobileAdminManifest
+      responses:
+        '200':
+          description: PWA manifest
+          content:
+            application/manifest+json:
+              schema:
+                $ref: '#/components/schemas/PWAManifest'
+
+  /admin/mobile/sw.js:
+    get:
+      tags:
+        - Mobile Admin
+      summary: Service worker
+      description: Returns the service worker script for offline support.
+      operationId: getMobileAdminServiceWorker
+      responses:
+        '200':
+          description: Service worker JavaScript
+          content:
+            application/javascript:
+              schema:
+                type: string
+
+  /admin/mobile/api/status:
+    get:
+      tags:
+        - Mobile Admin
+      summary: Get server status
+      description: Returns current server status including uptime, connections, and resource usage.
+      operationId: getMobileAdminStatus
+      responses:
+        '200':
+          description: Server status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileAdminStatusResponse'
+
+  /admin/mobile/api/alerts:
+    get:
+      tags:
+        - Mobile Admin
+      summary: Get alerts
+      description: Returns list of recent server alerts and notifications.
+      operationId: getMobileAdminAlerts
+      responses:
+        '200':
+          description: Alerts retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileAdminAlertsResponse'
+
+  /admin/mobile/api/users:
+    get:
+      tags:
+        - Mobile Admin
+      summary: Get users summary
+      description: Returns summary of user accounts for mobile admin view.
+      operationId: getMobileAdminUsers
+      responses:
+        '200':
+          description: Users summary retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileAdminUsersResponse'
+
+  /admin/mobile/api/queue:
+    get:
+      tags:
+        - Mobile Admin
+      summary: Get queue status
+      description: Returns mail queue status and pending messages.
+      operationId: getMobileAdminQueue
+      responses:
+        '200':
+          description: Queue status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileAdminQueueResponse'
+
+  /admin/mobile/api/stats:
+    get:
+      tags:
+        - Mobile Admin
+      summary: Get delivery statistics
+      description: Returns message delivery statistics for the last 24 hours.
+      operationId: getMobileAdminStats
+      responses:
+        '200':
+          description: Statistics retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileAdminStatsResponse'
+
+  /admin/mobile/api/action:
+    post:
+      tags:
+        - Mobile Admin
+      summary: Execute quick action
+      description: Execute a quick administrative action (flush queue, backup, etc).
+      operationId: executeMobileAdminAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MobileAdminActionRequest'
+      responses:
+        '200':
+          description: Action executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid action
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/mobile/api/acknowledge:
+    post:
+      tags:
+        - Mobile Admin
+      summary: Acknowledge alert
+      description: Mark an alert as acknowledged.
+      operationId: acknowledgeMobileAdminAlert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MobileAdminAcknowledgeRequest'
+      responses:
+        '200':
+          description: Alert acknowledged successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
 components:
   securitySchemes:
     csrfToken:
@@ -2130,3 +2597,541 @@ components:
         compress:
           type: boolean
           default: true
+
+    # ===========================================
+    # Webmail Schemas
+    # ===========================================
+
+    WebmailFoldersResponse:
+      type: object
+      required: [folders]
+      properties:
+        folders:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebmailFolder'
+
+    WebmailFolder:
+      type: object
+      required: [type, name, unread, icon]
+      properties:
+        type:
+          type: string
+          enum: [inbox, sent, drafts, trash, spam, archive, custom]
+        name:
+          type: string
+        unread:
+          type: integer
+        icon:
+          type: string
+
+    WebmailMessagesResponse:
+      type: object
+      required: [messages, total, page, per_page]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebmailMessageSummary'
+        total:
+          type: integer
+        page:
+          type: integer
+        per_page:
+          type: integer
+
+    WebmailMessageSummary:
+      type: object
+      required: [id, from, subject, date, is_read]
+      properties:
+        id:
+          type: string
+        from:
+          $ref: '#/components/schemas/EmailAddress'
+        subject:
+          type: string
+        preview:
+          type: string
+        date:
+          type: integer
+          format: int64
+        is_read:
+          type: boolean
+        is_starred:
+          type: boolean
+        has_attachments:
+          type: boolean
+
+    WebmailMessage:
+      type: object
+      required: [id, folder, from, to, subject, date, is_read]
+      properties:
+        id:
+          type: string
+        folder:
+          type: string
+          enum: [inbox, sent, drafts, trash, spam, archive, custom]
+        from:
+          $ref: '#/components/schemas/EmailAddress'
+        to:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailAddress'
+        cc:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailAddress'
+        bcc:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailAddress'
+        subject:
+          type: string
+        body_text:
+          type: string
+          nullable: true
+        body_html:
+          type: string
+          nullable: true
+        date:
+          type: integer
+          format: int64
+        is_read:
+          type: boolean
+        is_starred:
+          type: boolean
+        is_flagged:
+          type: boolean
+        has_attachments:
+          type: boolean
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebmailAttachment'
+        reply_to:
+          type: string
+          nullable: true
+        in_reply_to:
+          type: string
+          nullable: true
+        thread_id:
+          type: string
+          nullable: true
+
+    EmailAddress:
+      type: object
+      required: [email]
+      properties:
+        name:
+          type: string
+          nullable: true
+        email:
+          type: string
+          format: email
+
+    WebmailAttachment:
+      type: object
+      required: [id, filename, mime_type, size]
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        mime_type:
+          type: string
+        size:
+          type: integer
+        content_id:
+          type: string
+          nullable: true
+          description: For inline attachments
+
+    WebmailMessageUpdate:
+      type: object
+      properties:
+        is_read:
+          type: boolean
+        is_starred:
+          type: boolean
+        is_flagged:
+          type: boolean
+        folder:
+          type: string
+          enum: [inbox, sent, drafts, trash, spam, archive]
+
+    WebmailUserResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          type: object
+          properties:
+            email:
+              type: string
+            name:
+              type: string
+            preferences:
+              $ref: '#/components/schemas/WebmailUserPreferences'
+
+    WebmailUserPreferences:
+      type: object
+      properties:
+        theme:
+          type: string
+          enum: [light, dark, auto]
+          default: light
+        messages_per_page:
+          type: integer
+          default: 50
+        default_folder:
+          type: string
+          default: inbox
+        signature:
+          type: string
+          nullable: true
+        display_name:
+          type: string
+          nullable: true
+        reply_to:
+          type: string
+          nullable: true
+        auto_save_drafts:
+          type: boolean
+          default: true
+        confirm_delete:
+          type: boolean
+          default: true
+        show_images:
+          type: string
+          enum: [always, never, ask]
+          default: ask
+        text_size:
+          type: string
+          enum: [small, medium, large]
+          default: medium
+
+    WebmailComposeRequest:
+      type: object
+      required: [to, subject]
+      properties:
+        to:
+          type: array
+          items:
+            type: string
+            format: email
+          minItems: 1
+        cc:
+          type: array
+          items:
+            type: string
+            format: email
+        bcc:
+          type: array
+          items:
+            type: string
+            format: email
+        subject:
+          type: string
+        body_text:
+          type: string
+        body_html:
+          type: string
+        reply_to_id:
+          type: string
+          nullable: true
+        forward_id:
+          type: string
+          nullable: true
+        draft_id:
+          type: string
+          nullable: true
+        attachments:
+          type: array
+          items:
+            type: string
+          description: Array of attachment IDs from uploaded attachments
+
+    WebmailComposeResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [queued, sent, draft_saved]
+        message_id:
+          type: string
+
+    WebmailSearchRequest:
+      type: object
+      properties:
+        query:
+          type: string
+        folder:
+          type: string
+          enum: [inbox, sent, drafts, trash, spam, archive]
+        from:
+          type: string
+        to:
+          type: string
+        subject:
+          type: string
+        has_attachment:
+          type: boolean
+        is_unread:
+          type: boolean
+        is_starred:
+          type: boolean
+        date_from:
+          type: integer
+          format: int64
+        date_to:
+          type: integer
+          format: int64
+        page:
+          type: integer
+          default: 1
+        per_page:
+          type: integer
+          default: 50
+
+    WebmailSearchResponse:
+      type: object
+      required: [results, total]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebmailMessageSummary'
+        total:
+          type: integer
+
+    WebmailAttachmentResponse:
+      type: object
+      required: [id, filename, mime_type, size]
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        mime_type:
+          type: string
+        size:
+          type: integer
+
+    # ===========================================
+    # Mobile Admin Schemas
+    # ===========================================
+
+    PWAManifest:
+      type: object
+      properties:
+        name:
+          type: string
+        short_name:
+          type: string
+        description:
+          type: string
+        start_url:
+          type: string
+        display:
+          type: string
+        background_color:
+          type: string
+        theme_color:
+          type: string
+        icons:
+          type: array
+          items:
+            type: object
+            properties:
+              src:
+                type: string
+              sizes:
+                type: string
+              type:
+                type: string
+
+    MobileAdminStatusResponse:
+      type: object
+      required: [status, uptime, version]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, critical, offline]
+        uptime:
+          type: integer
+          format: int64
+          description: Uptime in seconds
+        version:
+          type: string
+        cpu:
+          type: number
+          format: float
+          description: CPU usage percentage
+        memory:
+          type: number
+          format: float
+          description: Memory usage percentage
+        disk:
+          type: number
+          format: float
+          description: Disk usage percentage
+        connections:
+          type: integer
+          description: Active connections
+        messages_today:
+          type: integer
+          format: int64
+          description: Messages processed today
+        queue_size:
+          type: integer
+          description: Messages in queue
+
+    MobileAdminAlertsResponse:
+      type: object
+      required: [alerts]
+      properties:
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MobileAdminAlert'
+        unread_count:
+          type: integer
+
+    MobileAdminAlert:
+      type: object
+      required: [id, severity, category, title, message, timestamp, acknowledged]
+      properties:
+        id:
+          type: string
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        category:
+          type: string
+          enum: [security, performance, delivery, system, queue]
+        title:
+          type: string
+        message:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+        acknowledged:
+          type: boolean
+
+    MobileAdminUsersResponse:
+      type: object
+      required: [users, total, active]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/MobileAdminUserSummary'
+        total:
+          type: integer
+        active:
+          type: integer
+
+    MobileAdminUserSummary:
+      type: object
+      required: [id, email, status]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        name:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, suspended, pending, locked]
+        last_login:
+          type: integer
+          format: int64
+          nullable: true
+        storage_used:
+          type: integer
+          format: int64
+        storage_quota:
+          type: integer
+          format: int64
+
+    MobileAdminQueueResponse:
+      type: object
+      required: [queue, total, pending, deferred]
+      properties:
+        queue:
+          type: array
+          items:
+            $ref: '#/components/schemas/MobileAdminQueueItem'
+        total:
+          type: integer
+        pending:
+          type: integer
+        deferred:
+          type: integer
+
+    MobileAdminQueueItem:
+      type: object
+      required: [id, from, to, subject, size, attempts, status]
+      properties:
+        id:
+          type: string
+        from:
+          type: string
+        to:
+          type: string
+        subject:
+          type: string
+        size:
+          type: integer
+        attempts:
+          type: integer
+        next_retry:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [pending, deferred, bounced, failed]
+
+    MobileAdminStatsResponse:
+      type: object
+      required: [messages_24h, delivered, bounced, deferred, spam_blocked]
+      properties:
+        messages_24h:
+          type: integer
+          format: int64
+        delivered:
+          type: integer
+          format: int64
+        bounced:
+          type: integer
+          format: int64
+        deferred:
+          type: integer
+          format: int64
+        spam_blocked:
+          type: integer
+          format: int64
+
+    MobileAdminActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [flush_queue, clear_cache, backup_now, send_test_email, restart_service, block_ip]
+        params:
+          type: object
+          additionalProperties: true
+          description: Optional parameters for the action
+
+    MobileAdminAcknowledgeRequest:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: Alert ID to acknowledge

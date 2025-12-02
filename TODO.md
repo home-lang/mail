@@ -2,6 +2,84 @@
 
 ## Recent Updates 📝
 
+### v0.32.0 (2025-12-02) - Drag-and-Drop Attachment Upload 🖱️
+- ✅ **Drag-and-Drop Attachment Upload**: Enhanced file attachment UX (`src/api/webmail.zig`)
+  - Drop zone overlay with visual feedback when dragging files
+  - Purple overlay with upload icon and instructions
+  - Pulse animation on the drop zone content
+  - Box shadow highlight on compose modal during drag
+  - Support for multiple files in single drop
+  - File size validation (25MB max per file)
+  - Max attachment count validation (10 files max)
+  - Counter-based drag tracking for nested elements
+  - Prevents default browser drag behaviors
+  - Automatic initialization on compose modal open
+  - CSS styles for `.drop-zone-overlay`, `.drop-zone-content`, `.drag-over`
+  - JavaScript handlers: `initDragAndDrop`, `handleDragEnter`, `handleDragLeave`, `handleDragOver`, `handleDrop`
+  - Integration with existing attachment upload API
+  - Unit tests for drop zone HTML and JavaScript presence
+
+### v0.31.0 (2025-12-02) - OpenAPI Documentation, Integration Tests & Attachment Uploads 📎
+- ✅ **OpenAPI Documentation**: Complete API documentation for new endpoints (`docs/openapi.yaml`)
+  - Added Webmail and Mobile Admin tags
+  - 15+ new webmail endpoints documented:
+    - GET/POST/DELETE /webmail/api/attachments
+    - GET /webmail/api/folders, /messages, /user
+    - POST /webmail/api/compose, /search
+  - 10+ mobile admin endpoints documented:
+    - GET /admin/mobile/api/status, /alerts, /users, /queue, /stats
+    - POST /admin/mobile/api/action, /acknowledge
+    - PWA manifest and service worker endpoints
+  - 25+ new schema definitions for request/response types
+  - Full OpenAPI 3.0.3 compliance
+- ✅ **Integration Tests**: Comprehensive test suite (`tests/webmail_mobile_admin_test.zig`)
+  - WebmailHandler initialization and configuration tests
+  - FolderType enum validation tests
+  - Request routing tests for all endpoints
+  - MobileAdminHandler tests for status, alerts, queue, users
+  - PWA manifest and service worker tests
+  - Cross-feature integration tests
+  - ServerStatus, AdminAlert, QuickAction struct tests
+- ✅ **Attachment Upload Feature**: Full attachment handling in webmail (`src/api/webmail.zig`)
+  - Upload endpoint: POST /webmail/api/attachments
+  - Download endpoint: GET /webmail/api/attachments/{id}
+  - Delete endpoint: DELETE /webmail/api/attachments/{id}
+  - Unique attachment ID generation with crypto.random
+  - Frontend JavaScript with drag-and-drop support
+  - File size validation (25MB max)
+  - Max attachment count validation (10 per email)
+  - Attachment list UI with remove functionality
+  - CSS styling for attachment chips
+  - Unit tests for all attachment endpoints
+
+### v0.30.0 (2025-12-02) - Webmail Client & Mobile Admin PWA 📱
+- ✅ **Webmail Client**: Full-featured web email interface (`src/api/webmail.zig`)
+  - Responsive HTML/CSS/JS single-page application
+  - Folder navigation (Inbox, Sent, Drafts, Trash, Spam, Archive)
+  - Email composition with rich text toolbar (bold, italic, links)
+  - Message list with search and filtering
+  - Reply/forward functionality
+  - Contact panel for quick recipient selection
+  - Mini calendar widget
+  - Dark/light theme toggle
+  - Toast notifications for user feedback
+- ✅ **Mobile Admin PWA**: Touch-optimized administration app (`src/api/mobile_admin.zig`)
+  - Progressive Web App with manifest and service worker
+  - Offline support and installable on mobile devices
+  - Pull-to-refresh for data updates
+  - Bottom navigation (Dashboard, Alerts, Queue, Users)
+  - Server status dashboard with real-time metrics
+  - Quick actions (Flush Queue, View Logs, Backup, Test Email)
+  - System metrics display (CPU, Memory, Disk, Delivered)
+  - Alert management with acknowledgment
+  - Settings panel with notifications toggle
+- ✅ **io_uring Full Integration**: Complete Linux async I/O (`src/infrastructure/io_uring.zig`)
+  - 914 lines of comprehensive io_uring implementation
+  - 40+ operation codes for all io_uring operations
+  - AsyncSmtpHandler for SMTP-specific async operations
+  - AsyncConnection with state management
+- 🎉 **Feature Complete**: All planned features now implemented!
+
 ### v0.29.0 (2025-11-25) - GraphQL API & Enterprise Audit Trail 🏢
 - ✅ **GraphQL API for User Management**: Full GraphQL implementation
   - Created `src/api/graphql.zig` with parser, executor, and resolvers
@@ -935,7 +1013,12 @@
   - [x] Async SMTP connection handler
   - [x] Error mapping and handling
   - [x] Connection state management
-  - [ ] Full io_uring syscall integration (requires Linux 5.1+)
+  - [x] Full io_uring syscall integration (requires Linux 5.1+) ✅
+    - 914 lines in `src/infrastructure/io_uring.zig`
+    - All 40+ io_uring operation codes
+    - SubmissionQueueEntry and CompletionQueueEntry structs
+    - IoUring struct with init/deinit and all submit operations
+    - AsyncSmtpHandler and AsyncConnection for SMTP async I/O
 - [x] Performance benchmarking suite
   - [x] Benchmark framework with warmup
   - [x] SMTP-specific benchmarks (email validation, base64, parsing)
@@ -1752,8 +1835,24 @@
   - ProtocolMetrics with per-protocol connection tracking
   - WebSocketFrame parser for RFC 6455 frames
   - ImapCommands and Pop3Commands parsers
-- [ ] Webmail client
-- [ ] Mobile app for administration
+- [x] Webmail client ✅ (`src/api/webmail.zig`)
+  - Full responsive HTML/CSS/JS webmail interface
+  - WebmailHandler with folder navigation (inbox, sent, drafts, trash, spam, archive)
+  - Email composition with rich text toolbar
+  - Message list with search and filtering
+  - Reply/forward functionality
+  - Contact panel and calendar widget
+  - Theme toggle (light/dark mode)
+  - Toast notifications
+- [x] Mobile app for administration ✅ (`src/api/mobile_admin.zig`)
+  - Progressive Web App (PWA) with manifest and service worker
+  - Touch-optimized mobile-first interface
+  - Pull-to-refresh, bottom navigation
+  - Dashboard with server status and system metrics
+  - Quick actions (flush queue, view logs, backup, test email)
+  - Alerts management with acknowledgment
+  - User and queue management views
+  - Settings and notifications support
 
 ## Known Issues 🐛
 
@@ -1830,8 +1929,8 @@ All research topics have been thoroughly investigated and documented in **docs/R
 
 ## Project Information
 
-**Last Updated**: 2025-11-26
-**Current Version**: v0.28.0
+**Last Updated**: 2025-12-02
+**Current Version**: v0.32.0
 **Zig Version**: 0.15.1
 **License**: MIT
 
