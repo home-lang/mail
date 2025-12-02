@@ -1,10 +1,14 @@
-# CDK
-*.js
-*.d.ts
-node_modules
-cdk.out
-cdk.context.json
+# Build
 dist
+*.d.ts
+
+# Dependencies
+node_modules
+bun.lock
+
+# ts-cloud
+.cloud
+*.cfn.json
 
 # Environment
 .env
@@ -21,15 +25,6 @@ dist
 
 # Logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 
 # Testing
 coverage
-
-# Production
-.aws-sam
-
-# CDK Context
-.cdk.staging

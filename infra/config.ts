@@ -1,133 +1,125 @@
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as logs from 'aws-cdk-lib/aws-logs';
-
 /**
  * Centralized Configuration for SMTP Server Infrastructure
  *
- * Modify these values to customize your deployment without editing the stack code.
+ * Pure TypeScript configuration without CDK dependencies.
+ * Used by cloud.config.ts for ts-cloud deployments.
  */
 
+export type Environment = 'dev' | 'staging' | 'production'
+
 export interface EnvironmentConfig {
-  /** EC2 instance type */
-  instanceType: ec2.InstanceType;
+  /** EC2 instance type (e.g., 't3.small', 't3.medium') */
+  instanceType: string
 
   /** EBS volume size in GB */
-  volumeSize: number;
+  volumeSize: number
 
   /** Enable CloudWatch monitoring and alarms */
-  enableMonitoring: boolean;
+  enableMonitoring: boolean
 
   /** Enable automatic backups */
-  enableBackups: boolean;
+  enableBackups: boolean
 
-  /** CloudWatch log retention period */
-  logRetention: logs.RetentionDays;
+  /** CloudWatch log retention in days */
+  logRetentionDays: number
 
   /** Maximum number of AZs for VPC */
-  maxAzs: number;
+  maxAzs: number
 
   /** S3 lifecycle transitions */
   s3Lifecycle: {
     /** Days until transition to Infrequent Access */
-    transitionToIA: number;
+    transitionToIA: number
     /** Days until transition to Glacier */
-    transitionToGlacier: number;
-  };
+    transitionToGlacier: number
+  }
 
   /** CloudWatch alarm thresholds */
   alarms: {
     /** CPU utilization percentage threshold */
-    cpuThreshold: number;
+    cpuThreshold: number
     /** Number of evaluation periods */
-    evaluationPeriods: number;
-  };
+    evaluationPeriods: number
+  }
 }
 
 export interface SmtpServerConfig {
   /** Environment-specific configurations */
-  environments: {
-    dev: EnvironmentConfig;
-    staging: EnvironmentConfig;
-    production: EnvironmentConfig;
-  };
+  environments: Record<Environment, EnvironmentConfig>
 
   /** VPC CIDR block */
-  vpcCidr: string;
+  vpcCidr: string
 
   /** Default AWS region */
-  defaultRegion: string;
+  defaultRegion: string
 
   /** Zig compiler version to install */
-  zigVersion: string;
+  zigVersion: string
 
   /** Git repository URL for SMTP server code */
-  gitRepository: string;
+  gitRepository: string
 
   /** Network ports configuration */
   ports: {
-    ssh: number;
-    smtp: number;
-    smtps: number;
-    submission: number;
-    imap: number;
-    imaps: number;
-    pop3: number;
-    pop3s: number;
-    http: number;
-    https: number;
-    websocket: number;
-    websocketSecure: number;
-  };
+    ssh: number
+    smtp: number
+    smtps: number
+    submission: number
+    imap: number
+    imaps: number
+    pop3: number
+    pop3s: number
+    http: number
+    https: number
+    websocket: number
+    websocketSecure: number
+  }
 
   /** SMTP server configuration */
   smtpServer: {
     /** Default SMTP port */
-    port: number;
+    port: number
     /** Maximum connections */
-    maxConnections: number;
+    maxConnections: number
     /** Maximum message size in bytes */
-    maxMessageSize: number;
+    maxMessageSize: number
     /** Maximum recipients per message */
-    maxRecipients: number;
+    maxRecipients: number
     /** Rate limit per IP */
-    rateLimitPerIp: number;
+    rateLimitPerIp: number
     /** Rate limit per user */
-    rateLimitPerUser: number;
-  };
+    rateLimitPerUser: number
+  }
 
   /** Security configuration */
   security: {
     /** SSH allowed CIDR blocks per environment */
-    sshAllowedCidrs: {
-      dev: string[];
-      staging: string[];
-      production: string[];
-    };
+    sshAllowedCidrs: Record<Environment, string[]>
     /** Require IMDSv2 for EC2 metadata */
-    requireImdsv2: boolean;
+    requireImdsv2: boolean
     /** Enable EBS encryption */
-    enableEbsEncryption: boolean;
+    enableEbsEncryption: boolean
     /** Enable S3 bucket versioning */
-    enableS3Versioning: boolean;
-  };
+    enableS3Versioning: boolean
+  }
 
   /** Installation paths */
   paths: {
-    installDir: string;
-    configDir: string;
-    dataDir: string;
-    logDir: string;
-    mailDir: string;
-    backupDir: string;
-  };
+    installDir: string
+    configDir: string
+    dataDir: string
+    logDir: string
+    mailDir: string
+    backupDir: string
+  }
 
   /** User data script configuration */
   userData: {
     /** Enable verbose logging during installation */
-    verboseLogging: boolean;
+    verboseLogging: boolean
     /** Install additional utilities */
-    installUtils: string[];
-  };
+    installUtils: string[]
+  }
 }
 
 /**
@@ -142,11 +134,11 @@ export const config: SmtpServerConfig = {
 
   environments: {
     dev: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),
+      instanceType: 't3.small',
       volumeSize: 30,
       enableMonitoring: false,
       enableBackups: false,
-      logRetention: logs.RetentionDays.ONE_WEEK,
+      logRetentionDays: 7,
       maxAzs: 2,
       s3Lifecycle: {
         transitionToIA: 30,
@@ -159,11 +151,11 @@ export const config: SmtpServerConfig = {
     },
 
     staging: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM),
+      instanceType: 't3.medium',
       volumeSize: 50,
       enableMonitoring: true,
       enableBackups: true,
-      logRetention: logs.RetentionDays.TWO_WEEKS,
+      logRetentionDays: 14,
       maxAzs: 2,
       s3Lifecycle: {
         transitionToIA: 30,
@@ -176,11 +168,11 @@ export const config: SmtpServerConfig = {
     },
 
     production: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.LARGE),
+      instanceType: 't3.large',
       volumeSize: 100,
       enableMonitoring: true,
       enableBackups: true,
-      logRetention: logs.RetentionDays.ONE_MONTH,
+      logRetentionDays: 30,
       maxAzs: 2,
       s3Lifecycle: {
         transitionToIA: 30,
@@ -220,7 +212,7 @@ export const config: SmtpServerConfig = {
   // ============================================================================
 
   zigVersion: '0.15.1',
-  gitRepository: 'https://github.com/yourusername/smtp-server.git',
+  gitRepository: 'https://github.com/stacksjs/mail.git',
 
   smtpServer: {
     port: 2525,
@@ -237,9 +229,9 @@ export const config: SmtpServerConfig = {
 
   security: {
     sshAllowedCidrs: {
-      dev: ['0.0.0.0/0'], // ⚠️ Open for development - change in production!
-      staging: ['0.0.0.0/0'], // ⚠️ Change to your office IP!
-      production: ['YOUR_OFFICE_IP/32'], // ⚠️ MUST CHANGE THIS!
+      dev: ['0.0.0.0/0'], // Open for development - change in production!
+      staging: ['0.0.0.0/0'], // Change to your office IP!
+      production: ['YOUR_OFFICE_IP/32'], // MUST CHANGE THIS!
     },
     requireImdsv2: true,
     enableEbsEncryption: true,
@@ -279,55 +271,55 @@ export const config: SmtpServerConfig = {
       'fail2ban',
     ],
   },
-};
+}
 
 /**
  * Helper function to get environment-specific configuration
  */
-export function getEnvironmentConfig(env: 'dev' | 'staging' | 'production'): EnvironmentConfig {
-  return config.environments[env];
+export function getEnvironmentConfig(env: Environment): EnvironmentConfig {
+  return config.environments[env]
 }
 
 /**
  * Helper function to get SSH allowed CIDRs for an environment
  */
-export function getSshAllowedCidrs(env: 'dev' | 'staging' | 'production'): string[] {
-  return config.security.sshAllowedCidrs[env];
+export function getSshAllowedCidrs(env: Environment): string[] {
+  return config.security.sshAllowedCidrs[env]
 }
 
 /**
  * Helper function to validate configuration
  */
-export function validateConfig(): { valid: boolean; errors: string[] } {
-  const errors: string[] = [];
+export function validateConfig(): { valid: boolean, errors: string[] } {
+  const errors: string[] = []
 
   // Check production SSH security
   if (config.security.sshAllowedCidrs.production.includes('0.0.0.0/0')) {
-    errors.push('⚠️ WARNING: Production SSH is open to the world! Change security.sshAllowedCidrs.production');
+    errors.push('WARNING: Production SSH is open to the world! Change security.sshAllowedCidrs.production')
   }
 
   if (config.security.sshAllowedCidrs.production.includes('YOUR_OFFICE_IP/32')) {
-    errors.push('⚠️ WARNING: Production SSH has placeholder IP! Update security.sshAllowedCidrs.production');
+    errors.push('WARNING: Production SSH has placeholder IP! Update security.sshAllowedCidrs.production')
   }
 
   // Check Git repository
   if (config.gitRepository.includes('yourusername')) {
-    errors.push('⚠️ WARNING: Update gitRepository URL to your actual repository');
+    errors.push('WARNING: Update gitRepository URL to your actual repository')
   }
 
   // Check instance sizes make sense
-  const envs = ['dev', 'staging', 'production'] as const;
+  const envs: Environment[] = ['dev', 'staging', 'production']
   for (const env of envs) {
-    const envConfig = config.environments[env];
+    const envConfig = config.environments[env]
     if (envConfig.volumeSize < 20) {
-      errors.push(`⚠️ WARNING: ${env} volume size is very small (${envConfig.volumeSize}GB)`);
+      errors.push(`WARNING: ${env} volume size is very small (${envConfig.volumeSize}GB)`)
     }
   }
 
   return {
     valid: errors.length === 0,
     errors,
-  };
+  }
 }
 
 /**
@@ -338,54 +330,38 @@ export const presets = {
    * Cost-optimized configuration (minimal resources)
    */
   costOptimized: {
-    dev: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
-      volumeSize: 20,
-    },
-    staging: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),
-      volumeSize: 30,
-    },
-    production: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM),
-      volumeSize: 50,
-    },
+    dev: { instanceType: 't3.micro', volumeSize: 20 },
+    staging: { instanceType: 't3.small', volumeSize: 30 },
+    production: { instanceType: 't3.medium', volumeSize: 50 },
   },
 
   /**
    * High-performance configuration (more resources)
    */
   highPerformance: {
-    dev: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM),
-      volumeSize: 50,
-    },
-    staging: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.LARGE),
-      volumeSize: 100,
-    },
-    production: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.XLARGE),
-      volumeSize: 200,
-    },
+    dev: { instanceType: 't3.medium', volumeSize: 50 },
+    staging: { instanceType: 't3.large', volumeSize: 100 },
+    production: { instanceType: 't3.xlarge', volumeSize: 200 },
   },
 
   /**
    * Development-only configuration (single environment)
    */
   devOnly: {
-    instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),
+    instanceType: 't3.small',
     volumeSize: 30,
     enableMonitoring: false,
     enableBackups: false,
   },
-};
+}
 
 // Export configuration validation on import (optional)
 if (process.env.VALIDATE_CONFIG === 'true') {
-  const validation = validateConfig();
+  const validation = validateConfig()
   if (!validation.valid) {
-    console.warn('⚠️  Configuration Warnings:');
-    validation.errors.forEach(error => console.warn(`   ${error}`));
+    console.warn('Configuration Warnings:')
+    for (const error of validation.errors) {
+      console.warn(`   ${error}`)
+    }
   }
 }

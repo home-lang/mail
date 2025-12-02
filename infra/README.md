@@ -1,8 +1,8 @@
-# SMTP Server - AWS CDK Infrastructure
+# SMTP Server - AWS Infrastructure
 
-Automated AWS infrastructure deployment for the SMTP server using AWS CDK with TypeScript.
+Automated AWS infrastructure deployment for the SMTP server using [ts-cloud](https://github.com/stacksjs/ts-cloud) with TypeScript and Bun.
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Overview](#overview)
 - [Architecture](#architecture)
@@ -19,7 +19,7 @@ Automated AWS infrastructure deployment for the SMTP server using AWS CDK with T
 
 ## Overview
 
-This CDK application deploys a complete SMTP server infrastructure on AWS, including:
+This ts-cloud application deploys a complete SMTP server infrastructure on AWS, including:
 
 - ✅ EC2 instance with optimized configuration
 - ✅ VPC with public subnet
@@ -89,26 +89,20 @@ This CDK application deploys a complete SMTP server infrastructure on AWS, inclu
 
 ### Required Tools
 
-1. **Node.js** (v18 or later)
+1. **Bun** (latest)
    ```bash
-   node --version  # Should be >= 18.0.0
+   bun --version  # Install from https://bun.sh
    ```
 
-2. **AWS CLI** (v2)
+2. **AWS Credentials** configured in `~/.aws/credentials` or environment variables
    ```bash
-   aws --version
-   aws configure  # Set up credentials
-   ```
-
-3. **AWS CDK** (v2)
-   ```bash
-   npm install -g aws-cdk
-   cdk --version
-   ```
-
-4. **TypeScript**
-   ```bash
-   npm install -g typescript
+   # Option 1: AWS CLI
+   aws configure
+   
+   # Option 2: Environment variables
+   export AWS_ACCESS_KEY_ID=your-key
+   export AWS_SECRET_ACCESS_KEY=your-secret
+   export AWS_REGION=us-east-1
    ```
 
 ### AWS Account Setup
@@ -140,18 +134,10 @@ Your AWS user/role needs:
 
 ```bash
 cd infra
-npm install
+bun install
 ```
 
-### 2. Bootstrap CDK (First Time Only)
-
-```bash
-npm run bootstrap
-```
-
-This creates the necessary CDK resources in your AWS account.
-
-### 3. Configure Environment
+### 2. Configure Environment
 
 Create a `.env` file in the `infra` directory:
 
@@ -171,10 +157,10 @@ DOMAIN_NAME=mail.example.com
 HOSTED_ZONE_ID=Z1234567890ABC
 ```
 
-### 4. Deploy Development Environment
+### 3. Deploy Development Environment
 
 ```bash
-npm run deploy:dev
+bun run deploy:dev
 ```
 
 This will:
@@ -206,12 +192,12 @@ export const config: SmtpServerConfig = {
   zigVersion: '0.15.1',
 
   // Update your repository
-  gitRepository: 'https://github.com/yourusername/smtp-server.git',
+  gitRepository: 'https://github.com/stacksjs/mail.git',
 
   // Environment-specific settings
   environments: {
     dev: {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),
+      instanceType: 't3.small',
       volumeSize: 30,
       // ... more settings
     },
@@ -224,15 +210,17 @@ export const config: SmtpServerConfig = {
     maxMessageSize: 52428800, // 50MB
     // ... more settings
   },
-};
+}
 ```
 
 ### Environment-Specific Settings
 
 #### Development
+
 ```bash
-ENVIRONMENT=dev npm run deploy:dev
+bun run deploy:dev
 ```
+
 - Instance: t3.small (configurable in `config.environments.dev.instanceType`)
 - Volume: 30 GB (configurable in `config.environments.dev.volumeSize`)
 - Monitoring: Disabled
@@ -240,9 +228,11 @@ ENVIRONMENT=dev npm run deploy:dev
 - Cost: ~$15-20/month
 
 #### Staging
+
 ```bash
-ENVIRONMENT=staging npm run deploy:staging
+bun run deploy:staging
 ```
+
 - Instance: t3.medium (configurable in `config.environments.staging.instanceType`)
 - Volume: 50 GB (configurable in `config.environments.staging.volumeSize`)
 - Monitoring: Enabled
@@ -250,8 +240,9 @@ ENVIRONMENT=staging npm run deploy:staging
 - Cost: ~$40-50/month
 
 #### Production
+
 ```bash
-ENVIRONMENT=production npm run deploy:prod
+bun run deploy:prod
 ```
 - Instance: t3.large (configurable in `config.environments.production.instanceType`)
 - Volume: 100 GB (configurable in `config.environments.production.volumeSize`)
