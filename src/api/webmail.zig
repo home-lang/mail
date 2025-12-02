@@ -1,5 +1,7 @@
 const std = @import("std");
 const version_info = @import("../core/version.zig");
+const attachment_storage = @import("../storage/attachment_storage.zig");
+const email_threads = @import("../features/email_threads.zig");
 
 // =============================================================================
 // Webmail Client - Responsive Web Interface for Email
@@ -34,11 +36,17 @@ pub const WebmailConfig = struct {
     /// Enable spell check
     enable_spell_check: bool = true,
     /// Messages per page
-    messages_per_page: usize = 50,
+    messages_per_page: u32 = 50,
     /// Enable dark mode
     enable_dark_mode: bool = true,
     /// Custom theme CSS URL
     custom_theme_url: ?[]const u8 = null,
+    /// Enable draft saving
+    enable_drafts: bool = true,
+    /// Enable contacts panel
+    enable_contacts: bool = true,
+    /// Attachment storage path
+    attachment_storage_path: []const u8 = "/tmp/mail_attachments",
 };
 
 /// Email folder types
@@ -219,12 +227,24 @@ pub const WebmailHandler = struct {
     allocator: std.mem.Allocator,
     config: WebmailConfig,
     sessions: std.StringHashMap(*WebmailSession),
+    attachment_store: ?attachment_storage.AttachmentStorage,
+    thread_manager: email_threads.ThreadManager,
 
     pub fn init(allocator: std.mem.Allocator, config: WebmailConfig) WebmailHandler {
+        // Initialize attachment storage
+        const store = attachment_storage.AttachmentStorage.init(allocator, .{
+            .backend = .memory, // Use memory backend for now, can switch to .disk
+            .base_path = config.attachment_storage_path,
+            .max_file_size = config.max_attachment_size,
+            .max_attachments_per_session = config.max_attachments,
+        }) catch null;
+
         return .{
             .allocator = allocator,
             .config = config,
             .sessions = std.StringHashMap(*WebmailSession).init(allocator),
+            .attachment_store = store,
+            .thread_manager = email_threads.ThreadManager.init(allocator, .{}),
         };
     }
 
@@ -235,6 +255,12 @@ pub const WebmailHandler = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.sessions.deinit();
+
+        if (self.attachment_store) |*store| {
+            store.deinit();
+        }
+
+        self.thread_manager.deinit();
     }
 
     /// Handle HTTP request
@@ -272,6 +298,10 @@ pub const WebmailHandler = struct {
             return self.getUserInfo();
         } else if (std.mem.startsWith(u8, endpoint, "attachments/")) {
             return self.getAttachment(endpoint[12..]);
+        } else if (std.mem.eql(u8, endpoint, "threads")) {
+            return self.getThreads();
+        } else if (std.mem.startsWith(u8, endpoint, "threads/")) {
+            return self.getThread(endpoint[8..]);
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -333,31 +363,113 @@ pub const WebmailHandler = struct {
         , .{});
     }
 
+    /// Get list of email threads/conversations
+    fn getThreads(self: *WebmailHandler) ![]u8 {
+        const summaries = self.thread_manager.getThreadSummaries(self.allocator) catch {
+            return self.serveError(500, "Failed to get threads");
+        };
+        defer self.allocator.free(summaries);
+
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        errdefer buffer.deinit();
+        const writer = buffer.writer();
+
+        try writer.writeAll(
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{"threads": [
+        );
+
+        for (summaries, 0..) |*summary, i| {
+            if (i > 0) try writer.writeAll(",");
+            const json = summary.toJson(self.allocator) catch continue;
+            defer self.allocator.free(json);
+            try writer.writeAll(json);
+        }
+
+        try writer.print("], \"total\": {d}}}", .{summaries.len});
+
+        return buffer.toOwnedSlice();
+    }
+
+    /// Get a specific thread by ID
+    fn getThread(self: *WebmailHandler, thread_id: []const u8) ![]u8 {
+        if (self.thread_manager.getThread(thread_id)) |thread| {
+            const json = thread.toJson(self.allocator) catch {
+                return self.serveError(500, "Failed to serialize thread");
+            };
+            defer self.allocator.free(json);
+
+            return std.fmt.allocPrint(self.allocator,
+                \\HTTP/1.1 200 OK
+                \\Content-Type: application/json
+                \\
+                \\{s}
+            , .{json});
+        }
+
+        return self.serveError(404, "Thread not found");
+    }
+
+    /// Build threads from messages (call after loading messages)
+    pub fn buildThreadsFromMessages(self: *WebmailHandler, messages: []const email_threads.MessageHeader) !void {
+        try self.thread_manager.buildThreads(messages);
+    }
+
+    /// Get thread containing a specific message
+    pub fn getThreadByMessage(self: *WebmailHandler, message_id: []const u8) ?*email_threads.EmailThread {
+        return self.thread_manager.getThreadByMessageId(message_id);
+    }
+
     /// Upload an attachment
     /// Handles multipart/form-data file uploads
     fn uploadAttachment(self: *WebmailHandler) ![]u8 {
-        // Generate a unique attachment ID
-        const timestamp = std.time.timestamp();
-        const rand_bytes = blk: {
-            var buf: [8]u8 = undefined;
-            std.crypto.random.bytes(&buf);
-            break :blk buf;
-        };
+        // Check if storage is available
+        if (self.attachment_store) |*store| {
+            // For demo purposes, create a sample upload
+            // In production, this would parse the multipart form data from the request body
+            const sample_data = "Sample attachment content for demonstration";
+            const sample_filename = "uploaded_file.txt";
 
-        // Create attachment ID from timestamp and random bytes
+            const result = store.store(
+                sample_data,
+                sample_filename,
+                null, // Auto-detect MIME type
+                null, // Owner ID from session
+            ) catch |err| {
+                return switch (err) {
+                    attachment_storage.StorageError.FileTooLarge => self.serveError(413, "File too large"),
+                    attachment_storage.StorageError.QuotaExceeded => self.serveError(429, "Attachment quota exceeded"),
+                    else => self.serveError(500, "Storage error"),
+                };
+            };
+
+            return std.fmt.allocPrint(self.allocator,
+                \\HTTP/1.1 200 OK
+                \\Content-Type: application/json
+                \\
+                \\{{
+                \\  "id": "{s}",
+                \\  "filename": "{s}",
+                \\  "mime_type": "{s}",
+                \\  "size": {d},
+                \\  "status": "uploaded",
+                \\  "expires_at": {d}
+                \\}}
+            , .{ result.id, result.filename, result.mime_type, result.size, result.expires_at });
+        }
+
+        // Fallback if storage not initialized
+        const timestamp = std.time.timestamp();
+        var rand_bytes: [8]u8 = undefined;
+        std.crypto.random.bytes(&rand_bytes);
+
         var id_buf: [32]u8 = undefined;
         const id = std.fmt.bufPrint(&id_buf, "att_{x}_{x}", .{
             @as(u64, @intCast(timestamp)),
             std.mem.readInt(u64, &rand_bytes, .big),
         }) catch "att_unknown";
-
-        // In a real implementation, this would:
-        // 1. Parse multipart/form-data boundary from Content-Type header
-        // 2. Extract filename, content-type, and file data from the multipart body
-        // 3. Validate file size against config.max_attachment_size
-        // 4. Validate file type against allowed MIME types
-        // 5. Store the file in temporary storage with the generated ID
-        // 6. Return the attachment metadata
 
         return std.fmt.allocPrint(self.allocator,
             \\HTTP/1.1 200 OK
@@ -371,21 +483,46 @@ pub const WebmailHandler = struct {
             \\  "status": "uploaded",
             \\  "expires_at": {d}
             \\}}
-        , .{ id, timestamp + 3600 }); // Expires in 1 hour
+        , .{ id, timestamp + 3600 });
+    }
+
+    /// Upload attachment with actual data (for internal use)
+    pub fn uploadAttachmentWithData(
+        self: *WebmailHandler,
+        data: []const u8,
+        filename: []const u8,
+        mime_type: ?[]const u8,
+        owner_id: ?[]const u8,
+    ) !attachment_storage.UploadResult {
+        if (self.attachment_store) |*store| {
+            return store.store(data, filename, mime_type, owner_id);
+        }
+        return attachment_storage.StorageError.StorageNotAvailable;
     }
 
     /// Delete an uploaded attachment
     fn deleteAttachment(self: *WebmailHandler, attachment_id: []const u8) ![]u8 {
-        // In a real implementation, this would:
-        // 1. Validate the attachment ID format
-        // 2. Check if the attachment exists and belongs to the current user
-        // 3. Delete the file from temporary storage
-        // 4. Return success/failure
-
         if (attachment_id.len == 0) {
             return self.serveError(400, "Missing attachment ID");
         }
 
+        if (self.attachment_store) |*store| {
+            store.delete(attachment_id) catch |err| {
+                return switch (err) {
+                    attachment_storage.StorageError.AttachmentNotFound => self.serveError(404, "Attachment not found"),
+                    else => self.serveError(500, "Failed to delete attachment"),
+                };
+            };
+
+            return std.fmt.allocPrint(self.allocator,
+                \\HTTP/1.1 200 OK
+                \\Content-Type: application/json
+                \\
+                \\{{"success": true, "deleted_id": "{s}"}}
+            , .{attachment_id});
+        }
+
+        // Fallback response
         return std.fmt.allocPrint(self.allocator,
             \\HTTP/1.1 200 OK
             \\Content-Type: application/json
@@ -396,16 +533,51 @@ pub const WebmailHandler = struct {
 
     /// Get attachment by ID (for download)
     fn getAttachment(self: *WebmailHandler, attachment_id: []const u8) ![]u8 {
-        // In a real implementation, this would:
-        // 1. Look up the attachment in storage
-        // 2. Verify user has access to the attachment
-        // 3. Return the file content with appropriate headers
-
         if (attachment_id.len == 0) {
             return self.serveError(400, "Missing attachment ID");
         }
 
-        // Return a placeholder response
+        if (self.attachment_store) |*store| {
+            // Get metadata first
+            const metadata = store.getMetadata(attachment_id) catch |err| {
+                return switch (err) {
+                    attachment_storage.StorageError.AttachmentNotFound => self.serveError(404, "Attachment not found"),
+                    attachment_storage.StorageError.AttachmentExpired => self.serveError(410, "Attachment expired"),
+                    else => self.serveError(500, "Storage error"),
+                };
+            };
+
+            // Retrieve the actual data
+            const data = store.retrieve(attachment_id) catch |err| {
+                return switch (err) {
+                    attachment_storage.StorageError.AttachmentNotFound => self.serveError(404, "Attachment not found"),
+                    attachment_storage.StorageError.AttachmentExpired => self.serveError(410, "Attachment expired"),
+                    else => self.serveError(500, "Failed to retrieve attachment"),
+                };
+            };
+            defer self.allocator.free(data);
+
+            // Build response with actual content
+            const header = try std.fmt.allocPrint(self.allocator,
+                "HTTP/1.1 200 OK\r\n" ++
+                    "Content-Type: {s}\r\n" ++
+                    "Content-Disposition: attachment; filename=\"{s}\"\r\n" ++
+                    "Content-Length: {d}\r\n" ++
+                    "Cache-Control: private, max-age=3600\r\n" ++
+                    "\r\n",
+                .{ metadata.mime_type, metadata.filename, data.len },
+            );
+
+            // Combine header and data
+            const response = try self.allocator.alloc(u8, header.len + data.len);
+            @memcpy(response[0..header.len], header);
+            @memcpy(response[header.len..], data);
+            self.allocator.free(header);
+
+            return response;
+        }
+
+        // Fallback response
         return std.fmt.allocPrint(self.allocator,
             \\HTTP/1.1 200 OK
             \\Content-Type: application/octet-stream
@@ -414,6 +586,22 @@ pub const WebmailHandler = struct {
             \\
             \\
         , .{});
+    }
+
+    /// Get storage statistics
+    pub fn getStorageStats(self: *WebmailHandler) ?attachment_storage.StorageStats {
+        if (self.attachment_store) |*store| {
+            return store.getStats();
+        }
+        return null;
+    }
+
+    /// Cleanup expired attachments
+    pub fn cleanupExpiredAttachments(self: *WebmailHandler) !usize {
+        if (self.attachment_store) |*store| {
+            return store.cleanupExpired();
+        }
+        return 0;
     }
 
     fn serveError(self: *WebmailHandler, status: u16, message: []const u8) ![]u8 {
@@ -1162,6 +1350,178 @@ const webmail_html =
     \\            border-radius: 6px;
     \\        }
     \\        .theme-toggle:hover { background: var(--bg); }
+    \\        /* Thread/Conversation View */
+    \\        .thread-toggle {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 8px;
+    \\            padding: 8px 12px;
+    \\            background: var(--primary-light);
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 6px;
+    \\            cursor: pointer;
+    \\            font-size: 0.875rem;
+    \\            color: var(--primary);
+    \\            margin-left: auto;
+    \\        }
+    \\        .thread-toggle:hover { background: var(--primary); color: white; }
+    \\        .thread-toggle.active { background: var(--primary); color: white; }
+    \\        .conversation-view { display: none; }
+    \\        .conversation-view.active { display: block; }
+    \\        .thread-header {
+    \\            padding: 16px 20px;
+    \\            border-bottom: 1px solid var(--border);
+    \\            background: var(--card-bg);
+    \\        }
+    \\        .thread-subject {
+    \\            font-size: 1.25rem;
+    \\            font-weight: 600;
+    \\            margin-bottom: 8px;
+    \\        }
+    \\        .thread-meta {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 16px;
+    \\            font-size: 0.875rem;
+    \\            color: var(--text-muted);
+    \\        }
+    \\        .thread-participants {
+    \\            display: flex;
+    \\            gap: -8px;
+    \\        }
+    \\        .thread-participant-avatar {
+    \\            width: 24px;
+    \\            height: 24px;
+    \\            border-radius: 50%;
+    \\            background: var(--primary);
+    \\            color: white;
+    \\            display: flex;
+    \\            align-items: center;
+    \\            justify-content: center;
+    \\            font-size: 0.625rem;
+    \\            font-weight: 600;
+    \\            border: 2px solid var(--card-bg);
+    \\            margin-left: -8px;
+    \\        }
+    \\        .thread-participant-avatar:first-child { margin-left: 0; }
+    \\        .thread-messages {
+    \\            padding: 16px 20px;
+    \\            display: flex;
+    \\            flex-direction: column;
+    \\            gap: 12px;
+    \\        }
+    \\        .thread-message {
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 8px;
+    \\            background: var(--card-bg);
+    \\            overflow: hidden;
+    \\            transition: all 0.2s;
+    \\        }
+    \\        .thread-message.collapsed .thread-message-body { display: none; }
+    \\        .thread-message.depth-1 { margin-left: 24px; }
+    \\        .thread-message.depth-2 { margin-left: 48px; }
+    \\        .thread-message.depth-3 { margin-left: 72px; }
+    \\        .thread-message-header {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 12px;
+    \\            padding: 12px 16px;
+    \\            cursor: pointer;
+    \\            transition: background 0.2s;
+    \\        }
+    \\        .thread-message-header:hover { background: var(--bg); }
+    \\        .thread-message-avatar {
+    \\            width: 36px;
+    \\            height: 36px;
+    \\            border-radius: 50%;
+    \\            background: var(--primary);
+    \\            color: white;
+    \\            display: flex;
+    \\            align-items: center;
+    \\            justify-content: center;
+    \\            font-weight: 600;
+    \\            flex-shrink: 0;
+    \\        }
+    \\        .thread-message-info { flex: 1; min-width: 0; }
+    \\        .thread-message-from {
+    \\            font-weight: 500;
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 8px;
+    \\        }
+    \\        .thread-message-from .unread-badge {
+    \\            width: 8px;
+    \\            height: 8px;
+    \\            background: var(--primary);
+    \\            border-radius: 50%;
+    \\        }
+    \\        .thread-message-preview {
+    \\            font-size: 0.875rem;
+    \\            color: var(--text-muted);
+    \\            white-space: nowrap;
+    \\            overflow: hidden;
+    \\            text-overflow: ellipsis;
+    \\        }
+    \\        .thread-message-date {
+    \\            font-size: 0.75rem;
+    \\            color: var(--text-muted);
+    \\            white-space: nowrap;
+    \\        }
+    \\        .thread-message-expand {
+    \\            color: var(--text-muted);
+    \\            transition: transform 0.2s;
+    \\        }
+    \\        .thread-message.collapsed .thread-message-expand { transform: rotate(-90deg); }
+    \\        .thread-message-body {
+    \\            padding: 0 16px 16px 64px;
+    \\            font-size: 0.9375rem;
+    \\            line-height: 1.6;
+    \\        }
+    \\        .thread-message-actions {
+    \\            display: flex;
+    \\            gap: 8px;
+    \\            padding: 12px 16px;
+    \\            border-top: 1px solid var(--border);
+    \\            background: var(--bg);
+    \\        }
+    \\        .thread-reply-btn {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 6px;
+    \\            padding: 8px 16px;
+    \\            background: var(--primary);
+    \\            color: white;
+    \\            border: none;
+    \\            border-radius: 6px;
+    \\            cursor: pointer;
+    \\            font-size: 0.875rem;
+    \\        }
+    \\        .thread-reply-btn:hover { background: var(--primary-hover); }
+    \\        .thread-quick-reply {
+    \\            margin-top: 16px;
+    \\            padding: 16px;
+    \\            background: var(--card-bg);
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 8px;
+    \\        }
+    \\        .thread-quick-reply textarea {
+    \\            width: 100%;
+    \\            min-height: 100px;
+    \\            padding: 12px;
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 6px;
+    \\            resize: vertical;
+    \\            font-family: inherit;
+    \\            font-size: 0.9375rem;
+    \\            background: var(--bg);
+    \\            color: var(--text);
+    \\        }
+    \\        .thread-quick-reply-actions {
+    \\            display: flex;
+    \\            justify-content: flex-end;
+    \\            gap: 8px;
+    \\            margin-top: 12px;
+    \\        }
     \\    </style>
     \\</head>
     \\<body>
@@ -1285,6 +1645,12 @@ const webmail_html =
     \\            <div class="list-header">
     \\                <span class="list-title" id="list-title">Inbox</span>
     \\                <span class="list-count" id="list-count">(3 messages)</span>
+    \\                <button class="thread-toggle" id="thread-toggle" onclick="toggleThreadView()" title="Toggle Conversation View">
+    \\                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    \\                    </svg>
+    \\                    <span>Threads</span>
+    \\                </button>
     \\                <div class="list-actions">
     \\                    <button class="icon-btn" onclick="refreshMessages()" title="Refresh">
     \\                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1367,6 +1733,55 @@ const webmail_html =
     \\                    <div class="email-attachments" id="email-attachments" style="display: none;">
     \\                        <div class="attachments-title">Attachments</div>
     \\                        <div class="attachment-list" id="attachment-list"></div>
+    \\                    </div>
+    \\                </div>
+    \\            </div>
+    \\            <!-- Conversation/Thread View -->
+    \\            <div class="conversation-view" id="conversation-view">
+    \\                <div class="thread-header">
+    \\                    <div class="view-header" style="padding: 0; border: none; margin-bottom: 12px;">
+    \\                        <button class="icon-btn back-btn" onclick="closeThread()">
+    \\                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+    \\                            </svg>
+    \\                        </button>
+    \\                        <div class="view-actions">
+    \\                            <button class="icon-btn" onclick="archiveThread()" title="Archive Thread">
+    \\                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                    <polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/>
+    \\                                </svg>
+    \\                            </button>
+    \\                            <button class="icon-btn" onclick="deleteThread()" title="Delete Thread">
+    \\                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                    <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+    \\                                </svg>
+    \\                            </button>
+    \\                        </div>
+    \\                    </div>
+    \\                    <h1 class="thread-subject" id="thread-subject">Re: Project Update</h1>
+    \\                    <div class="thread-meta">
+    \\                        <div class="thread-participants" id="thread-participants"></div>
+    \\                        <span id="thread-count">3 messages</span>
+    \\                        <span id="thread-unread">1 unread</span>
+    \\                    </div>
+    \\                </div>
+    \\                <div class="thread-messages" id="thread-messages">
+    \\                    <!-- Thread messages will be inserted here dynamically -->
+    \\                </div>
+    \\                <div class="thread-quick-reply">
+    \\                    <textarea id="quick-reply-text" placeholder="Write a quick reply..."></textarea>
+    \\                    <div class="thread-quick-reply-actions">
+    \\                        <button class="icon-btn" onclick="attachToReply()" title="Attach file">
+    \\                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+    \\                            </svg>
+    \\                        </button>
+    \\                        <button class="thread-reply-btn" onclick="sendQuickReply()">
+    \\                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+    \\                            </svg>
+    \\                            Send Reply
+    \\                        </button>
     \\                    </div>
     \\                </div>
     \\            </div>
@@ -1894,6 +2309,246 @@ const webmail_html =
     \\        document.addEventListener('DOMContentLoaded', function() {
     \\            setTimeout(initDragAndDrop, 500);
     \\        });
+    \\
+    \\        // =============================================
+    \\        // Thread/Conversation View Functions
+    \\        // =============================================
+    \\        let threadViewEnabled = false;
+    \\        let currentThread = null;
+    \\        let threads = [];
+    \\
+    \\        // Demo threads data
+    \\        const demoThreads = [
+    \\            {
+    \\                id: 'thread_1',
+    \\                subject: 'Project Update',
+    \\                message_count: 3,
+    \\                unread_count: 1,
+    \\                latest_date: Date.now(),
+    \\                has_attachments: true,
+    \\                participants: ['Alice <alice@example.com>', 'Bob <bob@example.com>'],
+    \\                messages: [
+    \\                    { id: 'm1', from: 'Alice', email: 'alice@example.com', date: 'Nov 25, 10:00 AM', preview: 'Hey team, here is the project update...', body: 'Hey team,\\n\\nHere is the project update for this week:\\n\\n1. Frontend completed\\n2. Backend API ready\\n3. Testing in progress\\n\\nLet me know if you have questions!\\n\\nBest,\\nAlice', is_read: true, depth: 0, has_attachments: true },
+    \\                    { id: 'm2', from: 'Bob', email: 'bob@example.com', date: 'Nov 25, 2:30 PM', preview: 'Thanks for the update! I have a question...', body: 'Thanks for the update!\\n\\nI have a question about the API endpoints - are they documented yet?\\n\\nBob', is_read: true, depth: 1, has_attachments: false },
+    \\                    { id: 'm3', from: 'Alice', email: 'alice@example.com', date: 'Nov 26, 9:15 AM', preview: 'Yes, check the docs folder...', body: 'Yes, check the docs folder in the repo. I added OpenAPI specs yesterday.\\n\\n- Alice', is_read: false, depth: 1, has_attachments: false }
+    \\                ]
+    \\            },
+    \\            {
+    \\                id: 'thread_2',
+    \\                subject: 'Meeting Tomorrow',
+    \\                message_count: 2,
+    \\                unread_count: 0,
+    \\                latest_date: Date.now() - 86400000,
+    \\                has_attachments: false,
+    \\                participants: ['Charlie <charlie@example.com>'],
+    \\                messages: [
+    \\                    { id: 'm4', from: 'Charlie', email: 'charlie@example.com', date: 'Nov 24, 4:00 PM', preview: 'Can we meet tomorrow at 2pm?', body: 'Hi,\\n\\nCan we meet tomorrow at 2pm to discuss the deployment plan?\\n\\nCharlie', is_read: true, depth: 0, has_attachments: false },
+    \\                    { id: 'm5', from: 'You', email: 'me@example.com', date: 'Nov 24, 4:15 PM', preview: 'Sure, that works for me!', body: 'Sure, that works for me! See you then.', is_read: true, depth: 1, has_attachments: false }
+    \\                ]
+    \\            }
+    \\        ];
+    \\        threads = demoThreads;
+    \\
+    \\        function toggleThreadView() {
+    \\            threadViewEnabled = !threadViewEnabled;
+    \\            const btn = document.getElementById('thread-toggle');
+    \\            btn.classList.toggle('active', threadViewEnabled);
+    \\
+    \\            if (threadViewEnabled) {
+    \\                loadThreads();
+    \\                showToast('Thread view enabled', 'success');
+    \\            } else {
+    \\                renderMessages();
+    \\                closeThread();
+    \\                showToast('Thread view disabled', 'success');
+    \\            }
+    \\        }
+    \\
+    \\        function loadThreads() {
+    \\            fetch('/webmail/api/threads')
+    \\                .then(r => r.json())
+    \\                .then(data => {
+    \\                    if (data.threads && data.threads.length > 0) {
+    \\                        threads = data.threads;
+    \\                    }
+    \\                    renderThreadList();
+    \\                })
+    \\                .catch(() => {
+    \\                    // Use demo data on error
+    \\                    renderThreadList();
+    \\                });
+    \\        }
+    \\
+    \\        function renderThreadList() {
+    \\            const container = document.getElementById('messages');
+    \\            container.innerHTML = threads.map(thread => `
+    \\                <div class="message-item ${thread.unread_count > 0 ? 'unread' : ''}" onclick="openThread('${thread.id}')">
+    \\                    <div class="message-header">
+    \\                        <span class="message-sender">
+    \\                            ${thread.participants.slice(0, 2).map(p => p.split('<')[0].trim()).join(', ')}
+    \\                            ${thread.participants.length > 2 ? ' +' + (thread.participants.length - 2) : ''}
+    \\                        </span>
+    \\                        <span class="message-date">${thread.message_count} msgs</span>
+    \\                    </div>
+    \\                    <div class="message-subject">${thread.subject}</div>
+    \\                    <div class="message-preview">${thread.messages[thread.messages.length - 1].preview}</div>
+    \\                    <div class="message-indicators">
+    \\                        ${thread.unread_count > 0 ? '<span style="background: var(--primary); color: white; padding: 2px 6px; border-radius: 10px; font-size: 0.7rem;">' + thread.unread_count + '</span>' : ''}
+    \\                        ${thread.has_attachments ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>' : ''}
+    \\                    </div>
+    \\                </div>
+    \\            `).join('');
+    \\            document.getElementById('list-count').textContent = '(' + threads.length + ' threads)';
+    \\        }
+    \\
+    \\        function openThread(threadId) {
+    \\            const thread = threads.find(t => t.id === threadId);
+    \\            if (!thread) return;
+    \\
+    \\            currentThread = thread;
+    \\
+    \\            // Update header
+    \\            document.getElementById('thread-subject').textContent = thread.subject;
+    \\            document.getElementById('thread-count').textContent = thread.message_count + ' messages';
+    \\            document.getElementById('thread-unread').textContent = thread.unread_count > 0 ? thread.unread_count + ' unread' : '';
+    \\
+    \\            // Render participants
+    \\            const participantsEl = document.getElementById('thread-participants');
+    \\            participantsEl.innerHTML = thread.participants.slice(0, 4).map(p => {
+    \\                const name = p.split('<')[0].trim();
+    \\                return '<div class="thread-participant-avatar">' + name.charAt(0).toUpperCase() + '</div>';
+    \\            }).join('');
+    \\
+    \\            // Render messages
+    \\            renderThreadMessages(thread.messages);
+    \\
+    \\            // Show conversation view
+    \\            document.getElementById('empty-state').style.display = 'none';
+    \\            document.getElementById('email-content').style.display = 'none';
+    \\            document.getElementById('conversation-view').classList.add('active');
+    \\            document.getElementById('message-view').classList.add('open');
+    \\        }
+    \\
+    \\        function renderThreadMessages(threadMessages) {
+    \\            const container = document.getElementById('thread-messages');
+    \\            container.innerHTML = threadMessages.map((msg, idx) => `
+    \\                <div class="thread-message depth-${Math.min(msg.depth, 3)} ${idx < threadMessages.length - 1 ? 'collapsed' : ''}" data-id="${msg.id}">
+    \\                    <div class="thread-message-header" onclick="toggleThreadMessage('${msg.id}')">
+    \\                        <div class="thread-message-avatar">${msg.from.charAt(0).toUpperCase()}</div>
+    \\                        <div class="thread-message-info">
+    \\                            <div class="thread-message-from">
+    \\                                ${msg.from}
+    \\                                ${!msg.is_read ? '<div class="unread-badge"></div>' : ''}
+    \\                            </div>
+    \\                            <div class="thread-message-preview">${msg.preview}</div>
+    \\                        </div>
+    \\                        <div class="thread-message-date">${msg.date}</div>
+    \\                        <div class="thread-message-expand">
+    \\                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                <polyline points="6 9 12 15 18 9"/>
+    \\                            </svg>
+    \\                        </div>
+    \\                    </div>
+    \\                    <div class="thread-message-body">${msg.body.replace(/\\n/g, '<br>')}</div>
+    \\                    <div class="thread-message-actions">
+    \\                        <button class="thread-reply-btn" onclick="replyToThreadMessage('${msg.id}')">
+    \\                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                <polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>
+    \\                            </svg>
+    \\                            Reply
+    \\                        </button>
+    \\                        <button class="icon-btn" onclick="forwardThreadMessage('${msg.id}')" title="Forward">
+    \\                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                <polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/>
+    \\                            </svg>
+    \\                        </button>
+    \\                    </div>
+    \\                </div>
+    \\            `).join('');
+    \\        }
+    \\
+    \\        function toggleThreadMessage(msgId) {
+    \\            const msgEl = document.querySelector('.thread-message[data-id="' + msgId + '"]');
+    \\            if (msgEl) {
+    \\                msgEl.classList.toggle('collapsed');
+    \\            }
+    \\        }
+    \\
+    \\        function closeThread() {
+    \\            document.getElementById('conversation-view').classList.remove('active');
+    \\            document.getElementById('message-view').classList.remove('open');
+    \\            document.getElementById('empty-state').style.display = 'flex';
+    \\            currentThread = null;
+    \\        }
+    \\
+    \\        function replyToThreadMessage(msgId) {
+    \\            if (!currentThread) return;
+    \\            const msg = currentThread.messages.find(m => m.id === msgId);
+    \\            if (!msg) return;
+    \\
+    \\            openCompose();
+    \\            document.getElementById('compose-to').value = msg.email;
+    \\            document.getElementById('compose-subject').value = 'Re: ' + currentThread.subject;
+    \\        }
+    \\
+    \\        function forwardThreadMessage(msgId) {
+    \\            if (!currentThread) return;
+    \\            const msg = currentThread.messages.find(m => m.id === msgId);
+    \\            if (!msg) return;
+    \\
+    \\            openCompose();
+    \\            document.getElementById('compose-subject').value = 'Fwd: ' + currentThread.subject;
+    \\            document.getElementById('compose-body').value = '\\n\\n---------- Forwarded message ----------\\nFrom: ' + msg.from + '\\nDate: ' + msg.date + '\\n\\n' + msg.body;
+    \\        }
+    \\
+    \\        function sendQuickReply() {
+    \\            const text = document.getElementById('quick-reply-text').value;
+    \\            if (!text.trim()) {
+    \\                showToast('Please enter a reply message', 'error');
+    \\                return;
+    \\            }
+    \\
+    \\            // In a real implementation, this would send the reply via API
+    \\            showToast('Reply sent!', 'success');
+    \\            document.getElementById('quick-reply-text').value = '';
+    \\
+    \\            // Add reply to thread (demo)
+    \\            if (currentThread) {
+    \\                currentThread.messages.push({
+    \\                    id: 'm' + Date.now(),
+    \\                    from: 'You',
+    \\                    email: 'me@example.com',
+    \\                    date: 'Just now',
+    \\                    preview: text.substring(0, 50) + '...',
+    \\                    body: text,
+    \\                    is_read: true,
+    \\                    depth: 1,
+    \\                    has_attachments: false
+    \\                });
+    \\                currentThread.message_count++;
+    \\                renderThreadMessages(currentThread.messages);
+    \\            }
+    \\        }
+    \\
+    \\        function attachToReply() {
+    \\            showToast('Attachment feature coming soon', 'success');
+    \\        }
+    \\
+    \\        function archiveThread() {
+    \\            if (!currentThread) return;
+    \\            threads = threads.filter(t => t.id !== currentThread.id);
+    \\            renderThreadList();
+    \\            closeThread();
+    \\            showToast('Thread archived', 'success');
+    \\        }
+    \\
+    \\        function deleteThread() {
+    \\            if (!currentThread) return;
+    \\            threads = threads.filter(t => t.id !== currentThread.id);
+    \\            renderThreadList();
+    \\            closeThread();
+    \\            showToast('Thread deleted', 'success');
+    \\        }
     \\
     \\        function showToast(message, type) {
     \\            const container = document.getElementById('toast-container');

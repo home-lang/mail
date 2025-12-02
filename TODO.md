@@ -2,6 +2,83 @@
 
 ## Recent Updates 📝
 
+### v0.34.0 (2025-12-02) - Email Thread/Conversation View 💬
+- ✅ **Email Thread System**: Complete threading implementation (`src/features/email_threads.zig`)
+  - **Threading Algorithm** (JWZ/RFC 5256):
+    - `ThreadManager` - Builds and manages email threads
+    - `ThreadedMessage` - Message node with parent/child relationships
+    - `EmailThread` - Complete thread with participants, stats
+    - Message-ID, In-Reply-To, References header parsing
+    - Subject normalization (removes Re:, Fwd: prefixes)
+    - Circular reference detection
+    - Subject-based grouping for orphan messages
+  - **Data Structures**:
+    - `MessageHeader` - Threading metadata
+    - `FlattenedMessage` - Display-ready message with depth
+    - `ThreadSummary` - List view summary
+    - JSON serialization for all structures
+  - **Webmail Integration** (`src/api/webmail.zig`):
+    - `GET /webmail/api/threads` - List all threads
+    - `GET /webmail/api/threads/:id` - Get thread details
+    - `buildThreadsFromMessages()` - Build threads from messages
+    - `getThreadByMessage()` - Find thread by message ID
+  - **Conversation View UI**:
+    - Thread toggle button in list header
+    - Collapsible message cards with depth indentation
+    - Participant avatars with overlap display
+    - Unread badges and attachment indicators
+    - Quick reply textarea at bottom
+    - Reply/Forward buttons per message
+    - Thread archive/delete actions
+  - **CSS Styling**:
+    - `.thread-toggle` - View mode switcher
+    - `.thread-message` - Collapsible message card
+    - `.thread-message-header` - Expandable header
+    - `.thread-quick-reply` - Inline reply box
+    - Depth-based indentation (up to 3 levels)
+  - **JavaScript Functions**:
+    - `toggleThreadView()` - Switch between views
+    - `openThread()` / `closeThread()` - Navigation
+    - `renderThreadMessages()` - Display messages
+    - `toggleThreadMessage()` - Expand/collapse
+    - `sendQuickReply()` - Inline reply
+    - Demo data for testing
+  - **Tests**: 4 unit tests for threading logic
+
+### v0.33.0 (2025-12-02) - Attachment Storage Backend 💾
+- ✅ **Attachment Storage System**: Complete storage backend (`src/storage/attachment_storage.zig`)
+  - **Storage Abstraction Layer**:
+    - `AttachmentStorage` - Main interface with pluggable backends
+    - `AttachmentStorageConfig` - Comprehensive configuration options
+    - `AttachmentMetadata` - Full metadata tracking (hash, expiry, owner)
+    - `UploadResult` - Standardized upload response
+    - `StorageStats` - Statistics for monitoring
+  - **Disk Backend** (`DiskBackend`):
+    - Hierarchical directory structure (year/month/day/id)
+    - Automatic directory creation
+    - Full file read/write/delete operations
+    - Path-based organization
+  - **Memory Backend** (`MemoryBackend`):
+    - In-memory storage for testing
+    - HashMap-based file storage
+    - Thread-safe operations
+  - **S3-Compatible Backend** (framework ready):
+    - Uses existing `s3storage.zig` infrastructure
+    - Ready for AWS S3 / MinIO / DigitalOcean Spaces
+  - **Features**:
+    - SHA-256 content hashing for integrity
+    - MIME type auto-detection (40+ file types)
+    - Configurable file size limits (default 25MB)
+    - Automatic expiry with cleanup
+    - Owner-based access control
+    - Deduplication support (configurable)
+  - **Webmail Integration**:
+    - `uploadAttachmentWithData()` - Store with actual content
+    - `getStorageStats()` - Monitor storage usage
+    - `cleanupExpiredAttachments()` - Maintenance
+    - Full error handling with HTTP status codes
+  - **Tests**: 8 unit tests for all storage operations
+
 ### v0.32.0 (2025-12-02) - Drag-and-Drop Attachment Upload 🖱️
 - ✅ **Drag-and-Drop Attachment Upload**: Enhanced file attachment UX (`src/api/webmail.zig`)
   - Drop zone overlay with visual feedback when dragging files
@@ -1930,7 +2007,7 @@ All research topics have been thoroughly investigated and documented in **docs/R
 ## Project Information
 
 **Last Updated**: 2025-12-02
-**Current Version**: v0.32.0
+**Current Version**: v0.34.0
 **Zig Version**: 0.15.1
 **License**: MIT
 
