@@ -6,14 +6,14 @@ const std = @import("std");
 
 /// Semantic version components
 pub const version_major: u32 = 0;
-pub const version_minor: u32 = 36;
+pub const version_minor: u32 = 37;
 pub const version_patch: u32 = 0;
 
 /// Full version string (matches build.zig.zon)
-pub const version = "0.36.0";
+pub const version = "0.37.0";
 
 /// Version with 'v' prefix for display
-pub const version_display = "v0.36.0";
+pub const version_display = "v0.37.0";
 
 /// Application name
 pub const app_name = "SMTP Server";

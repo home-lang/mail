@@ -5,6 +5,9 @@ const email_threads = @import("../features/email_threads.zig");
 const inline_images = @import("../features/inline_images.zig");
 const email_templates = @import("../features/email_templates.zig");
 const email_signatures = @import("../features/email_signatures.zig");
+const read_receipts = @import("../features/read_receipts.zig");
+const email_scheduling = @import("../features/email_scheduling.zig");
+const contact_groups = @import("../features/contact_groups.zig");
 
 // =============================================================================
 // Webmail Client - Responsive Web Interface for Email
@@ -235,6 +238,9 @@ pub const WebmailHandler = struct {
     inline_store: inline_images.InlineImageStore,
     template_manager: email_templates.TemplateManager,
     signature_manager: email_signatures.SignatureManager,
+    receipt_manager: read_receipts.ReadReceiptManager,
+    scheduler: email_scheduling.EmailScheduler,
+    group_manager: contact_groups.ContactGroupManager,
 
     pub fn init(allocator: std.mem.Allocator, config: WebmailConfig) WebmailHandler {
         // Initialize attachment storage
@@ -254,6 +260,9 @@ pub const WebmailHandler = struct {
             .inline_store = inline_images.InlineImageStore.init(allocator, .{}),
             .template_manager = email_templates.TemplateManager.init(allocator, .{}),
             .signature_manager = email_signatures.SignatureManager.init(allocator, .{}),
+            .receipt_manager = read_receipts.ReadReceiptManager.init(allocator, .{}),
+            .scheduler = email_scheduling.EmailScheduler.init(allocator, .{}),
+            .group_manager = contact_groups.ContactGroupManager.init(allocator, .{}),
         };
     }
 
@@ -273,6 +282,9 @@ pub const WebmailHandler = struct {
         self.inline_store.deinit();
         self.template_manager.deinit();
         self.signature_manager.deinit();
+        self.receipt_manager.deinit();
+        self.scheduler.deinit();
+        self.group_manager.deinit();
     }
 
     /// Handle HTTP request
@@ -326,6 +338,14 @@ pub const WebmailHandler = struct {
             return self.getSignatures();
         } else if (std.mem.startsWith(u8, endpoint, "signatures/")) {
             return self.getSignature(endpoint[11..]);
+        } else if (std.mem.eql(u8, endpoint, "receipts")) {
+            return self.getReceipts();
+        } else if (std.mem.eql(u8, endpoint, "scheduled")) {
+            return self.getScheduledEmails();
+        } else if (std.mem.eql(u8, endpoint, "groups")) {
+            return self.getContactGroups();
+        } else if (std.mem.startsWith(u8, endpoint, "groups/expand/")) {
+            return self.expandGroup(endpoint[14..]);
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -349,6 +369,18 @@ pub const WebmailHandler = struct {
             return self.createSignature();
         } else if (std.mem.startsWith(u8, endpoint, "signatures/default/")) {
             return self.setDefaultSignature(endpoint[19..]);
+        } else if (std.mem.eql(u8, endpoint, "receipts/request")) {
+            return self.requestReceipt();
+        } else if (std.mem.startsWith(u8, endpoint, "receipts/send/")) {
+            return self.sendReceipt(endpoint[14..]);
+        } else if (std.mem.eql(u8, endpoint, "schedule")) {
+            return self.scheduleEmail();
+        } else if (std.mem.startsWith(u8, endpoint, "schedule/cancel/")) {
+            return self.cancelSchedule(endpoint[16..]);
+        } else if (std.mem.eql(u8, endpoint, "groups")) {
+            return self.createGroup();
+        } else if (std.mem.startsWith(u8, endpoint, "groups/member/")) {
+            return self.addGroupMember(endpoint[14..]);
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -737,6 +769,224 @@ pub const WebmailHandler = struct {
     /// Get default signature for context
     pub fn getDefaultSignature(self: *WebmailHandler, context: email_signatures.SignatureManager.SignatureContext) ?*const email_signatures.EmailSignature {
         return self.signature_manager.getForContext(context, null);
+    }
+
+    // =========================================================================
+    // Read Receipt API Methods
+    // =========================================================================
+
+    fn getReceipts(self: *WebmailHandler) ![]u8 {
+        const outgoing = self.receipt_manager.getOutgoing(self.allocator) catch {
+            return self.serveError(500, "Failed to get receipts");
+        };
+        defer self.allocator.free(outgoing);
+
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        errdefer buffer.deinit();
+        const writer = buffer.writer();
+
+        try writer.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"receipts\":[");
+
+        for (outgoing, 0..) |*rcpt, i| {
+            if (i > 0) try writer.writeAll(",");
+            const json = rcpt.toJson(self.allocator) catch continue;
+            defer self.allocator.free(json);
+            try writer.writeAll(json);
+        }
+
+        const stats = self.receipt_manager.getStats();
+        try writer.print("],\"pending\":{d},\"read\":{d}}}", .{ stats.outgoing_pending, stats.outgoing_read });
+
+        return buffer.toOwnedSlice();
+    }
+
+    fn requestReceipt(self: *WebmailHandler) ![]u8 {
+        const id = self.receipt_manager.requestReceipt(
+            "<demo_msg@example.com>",
+            "Demo Subject",
+            "me@example.com",
+            "recipient@example.com",
+        ) catch {
+            return self.serveError(500, "Failed to request receipt");
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 201 Created
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","status":"requested"}}
+        , .{id});
+    }
+
+    fn sendReceipt(self: *WebmailHandler, request_id: []const u8) ![]u8 {
+        self.receipt_manager.sendReceipt(request_id) catch |err| {
+            return switch (err) {
+                read_receipts.ReceiptError.ReceiptNotFound => self.serveError(404, "Receipt not found"),
+                read_receipts.ReceiptError.AlreadySent => self.serveError(409, "Already sent"),
+                else => self.serveError(500, "Failed to send receipt"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","status":"sent"}}
+        , .{request_id});
+    }
+
+    // =========================================================================
+    // Email Scheduling API Methods
+    // =========================================================================
+
+    fn getScheduledEmails(self: *WebmailHandler) ![]u8 {
+        const pending = self.scheduler.getPending(self.allocator) catch {
+            return self.serveError(500, "Failed to get scheduled emails");
+        };
+        defer self.allocator.free(pending);
+
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        errdefer buffer.deinit();
+        const writer = buffer.writer();
+
+        try writer.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"scheduled\":[");
+
+        for (pending, 0..) |*sched, i| {
+            if (i > 0) try writer.writeAll(",");
+            const json = sched.toJson(self.allocator) catch continue;
+            defer self.allocator.free(json);
+            try writer.writeAll(json);
+        }
+
+        const stats = self.scheduler.getStats();
+        try writer.print("],\"total\":{d},\"pending\":{d}}}", .{ stats.total, stats.pending });
+
+        return buffer.toOwnedSlice();
+    }
+
+    fn scheduleEmail(self: *WebmailHandler) ![]u8 {
+        // Demo: schedule for 1 hour from now
+        const send_at = std.time.timestamp() + 3600;
+
+        const id = self.scheduler.schedule(
+            "demo@example.com",
+            "Scheduled Demo",
+            "This is a scheduled email.",
+            send_at,
+            .{},
+        ) catch |err| {
+            return switch (err) {
+                email_scheduling.ScheduleError.QueueFull => self.serveError(429, "Schedule queue full"),
+                email_scheduling.ScheduleError.PastTime => self.serveError(400, "Cannot schedule in the past"),
+                else => self.serveError(500, "Failed to schedule"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 201 Created
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","send_at":{d},"status":"scheduled"}}
+        , .{ id, send_at });
+    }
+
+    fn cancelSchedule(self: *WebmailHandler, schedule_id: []const u8) ![]u8 {
+        self.scheduler.cancel(schedule_id) catch |err| {
+            return switch (err) {
+                email_scheduling.ScheduleError.ScheduleNotFound => self.serveError(404, "Schedule not found"),
+                email_scheduling.ScheduleError.AlreadySent => self.serveError(409, "Already sent"),
+                else => self.serveError(500, "Failed to cancel"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","status":"cancelled"}}
+        , .{schedule_id});
+    }
+
+    // =========================================================================
+    // Contact Groups API Methods
+    // =========================================================================
+
+    fn getContactGroups(self: *WebmailHandler) ![]u8 {
+        const groups = self.group_manager.list(self.allocator) catch {
+            return self.serveError(500, "Failed to list groups");
+        };
+        defer self.allocator.free(groups);
+
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        errdefer buffer.deinit();
+        const writer = buffer.writer();
+
+        try writer.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"groups\":[");
+
+        for (groups, 0..) |group, i| {
+            if (i > 0) try writer.writeAll(",");
+            const json = group.toJson(self.allocator) catch continue;
+            defer self.allocator.free(json);
+            try writer.writeAll(json);
+        }
+
+        const stats = self.group_manager.getStats();
+        try writer.print("],\"total\":{d},\"total_members\":{d}}}", .{ stats.total_groups, stats.total_members });
+
+        return buffer.toOwnedSlice();
+    }
+
+    fn createGroup(self: *WebmailHandler) ![]u8 {
+        const id = self.group_manager.create("New Group", "A new contact group") catch |err| {
+            return switch (err) {
+                contact_groups.GroupError.GroupFull => self.serveError(429, "Maximum groups reached"),
+                else => self.serveError(500, "Failed to create group"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 201 Created
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","status":"created"}}
+        , .{id});
+    }
+
+    fn addGroupMember(self: *WebmailHandler, group_id: []const u8) ![]u8 {
+        const group = self.group_manager.get(group_id) orelse {
+            return self.serveError(404, "Group not found");
+        };
+
+        group.addEmail("new@example.com", "New Member") catch |err| {
+            return switch (err) {
+                contact_groups.GroupError.DuplicateMember => self.serveError(409, "Member already exists"),
+                else => self.serveError(500, "Failed to add member"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{"group_id":"{s}","status":"member_added"}}
+        , .{group_id});
+    }
+
+    fn expandGroup(self: *WebmailHandler, group_id: []const u8) ![]u8 {
+        const emails = self.group_manager.expandGroup(group_id, self.allocator) catch |err| {
+            return switch (err) {
+                contact_groups.GroupError.GroupNotFound => self.serveError(404, "Group not found"),
+                else => self.serveError(500, "Failed to expand group"),
+            };
+        };
+        defer self.allocator.free(emails);
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{"group_id":"{s}","emails":"{s}"}}
+        , .{ group_id, emails });
     }
 
     /// Upload an attachment
@@ -2070,6 +2320,107 @@ const webmail_html =
     \\            border-top: 1px solid var(--border);
     \\            margin-top: 8px;
     \\        }
+    \\        /* Read Receipt, Scheduling, Groups */
+    \\        .compose-options {
+    \\            display: flex;
+    \\            flex-wrap: wrap;
+    \\            gap: 12px;
+    \\            padding: 10px 0;
+    \\            border-top: 1px solid var(--border);
+    \\        }
+    \\        .compose-option {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 6px;
+    \\            font-size: 0.8125rem;
+    \\            color: var(--text-muted);
+    \\        }
+    \\        .compose-option input[type="checkbox"] {
+    \\            accent-color: var(--primary);
+    \\        }
+    \\        .schedule-picker {
+    \\            display: none;
+    \\            padding: 12px;
+    \\            background: var(--bg);
+    \\            border-radius: 8px;
+    \\            margin-top: 8px;
+    \\        }
+    \\        .schedule-picker.open { display: block; }
+    \\        .schedule-picker input {
+    \\            padding: 8px;
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 6px;
+    \\            font-size: 0.875rem;
+    \\            background: var(--card-bg);
+    \\            color: var(--text);
+    \\        }
+    \\        .schedule-presets {
+    \\            display: flex;
+    \\            gap: 6px;
+    \\            margin-top: 8px;
+    \\        }
+    \\        .schedule-preset {
+    \\            padding: 4px 10px;
+    \\            background: var(--primary-light);
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 4px;
+    \\            font-size: 0.75rem;
+    \\            cursor: pointer;
+    \\        }
+    \\        .schedule-preset:hover { background: var(--primary); color: white; }
+    \\        .groups-dropdown {
+    \\            position: relative;
+    \\        }
+    \\        .groups-list {
+    \\            position: absolute;
+    \\            top: 100%;
+    \\            left: 0;
+    \\            background: var(--card-bg);
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 8px;
+    \\            box-shadow: var(--shadow-lg);
+    \\            min-width: 200px;
+    \\            max-height: 200px;
+    \\            overflow-y: auto;
+    \\            z-index: 100;
+    \\            display: none;
+    \\        }
+    \\        .groups-list.open { display: block; }
+    \\        .group-option {
+    \\            padding: 10px 12px;
+    \\            cursor: pointer;
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 8px;
+    \\        }
+    \\        .group-option:hover { background: var(--bg); }
+    \\        .group-badge {
+    \\            background: var(--primary-light);
+    \\            color: var(--primary);
+    \\            padding: 2px 6px;
+    \\            border-radius: 10px;
+    \\            font-size: 0.7rem;
+    \\        }
+    \\        .scheduled-indicator {
+    \\            display: inline-flex;
+    \\            align-items: center;
+    \\            gap: 4px;
+    \\            padding: 4px 8px;
+    \\            background: var(--warning-light);
+    \\            color: var(--warning);
+    \\            border-radius: 4px;
+    \\            font-size: 0.75rem;
+    \\        }
+    \\        .receipt-indicator {
+    \\            display: inline-flex;
+    \\            align-items: center;
+    \\            gap: 4px;
+    \\            padding: 2px 6px;
+    \\            background: var(--success-light);
+    \\            color: var(--success);
+    \\            border-radius: 4px;
+    \\            font-size: 0.7rem;
+    \\        }
     \\    </style>
     \\</head>
     \\<body>
@@ -2391,10 +2742,55 @@ const webmail_html =
     \\                        </svg>
     \\                        Signature
     \\                    </button>
+    \\                    <div class="groups-dropdown">
+    \\                        <button class="templates-btn" onclick="toggleGroups()" title="Contact Groups">
+    \\                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+    \\                            </svg>
+    \\                            Groups
+    \\                        </button>
+    \\                        <div class="groups-list" id="groups-list">
+    \\                            <div class="group-option" onclick="insertGroup('team')">
+    \\                                <span>Development Team</span>
+    \\                                <span class="group-badge">5</span>
+    \\                            </div>
+    \\                            <div class="group-option" onclick="insertGroup('mgmt')">
+    \\                                <span>Management</span>
+    \\                                <span class="group-badge">3</span>
+    \\                            </div>
+    \\                            <div class="group-option" onclick="insertGroup('all')">
+    \\                                <span>All Staff</span>
+    \\                                <span class="group-badge">25</span>
+    \\                            </div>
+    \\                        </div>
+    \\                    </div>
     \\                    <label style="display: flex; align-items: center; gap: 4px; margin-left: auto; font-size: 0.8125rem; color: var(--text-muted);">
     \\                        <input type="checkbox" id="auto-signature" checked style="accent-color: var(--primary);">
     \\                        Auto-insert signature
     \\                    </label>
+    \\                </div>
+    \\                <div class="compose-options">
+    \\                    <label class="compose-option">
+    \\                        <input type="checkbox" id="request-receipt">
+    \\                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+    \\                        Request read receipt
+    \\                    </label>
+    \\                    <label class="compose-option">
+    \\                        <input type="checkbox" id="schedule-send" onchange="toggleSchedulePicker()">
+    \\                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    \\                        Schedule send
+    \\                    </label>
+    \\                    <span id="schedule-time-display" class="scheduled-indicator" style="display: none;"></span>
+    \\                </div>
+    \\                <div class="schedule-picker" id="schedule-picker">
+    \\                    <label style="font-size: 0.8125rem; color: var(--text-muted);">Send at:</label>
+    \\                    <input type="datetime-local" id="schedule-datetime" onchange="updateScheduleDisplay()">
+    \\                    <div class="schedule-presets">
+    \\                        <span class="schedule-preset" onclick="setSchedulePreset(1)">In 1 hour</span>
+    \\                        <span class="schedule-preset" onclick="setSchedulePreset(3)">In 3 hours</span>
+    \\                        <span class="schedule-preset" onclick="setSchedulePreset(24)">Tomorrow</span>
+    \\                        <span class="schedule-preset" onclick="setSchedulePreset(168)">Next week</span>
+    \\                    </div>
     \\                </div>
     \\            </div>
     \\            <!-- Drop Zone Overlay -->
@@ -3550,6 +3946,112 @@ const webmail_html =
     \\                    bodyField.setSelectionRange(0, 0); // Move cursor to start
     \\                }
     \\            }
+    \\        };
+    \\
+    \\        // =============================================
+    \\        // Read Receipts, Scheduling, Groups
+    \\        // =============================================
+    \\
+    \\        // Contact groups data
+    \\        const contactGroups = {
+    \\            team: { name: 'Development Team', emails: 'dev1@example.com, dev2@example.com, dev3@example.com, dev4@example.com, dev5@example.com' },
+    \\            mgmt: { name: 'Management', emails: 'ceo@example.com, cto@example.com, cfo@example.com' },
+    \\            all: { name: 'All Staff', emails: 'staff@example.com' }
+    \\        };
+    \\
+    \\        let scheduledTime = null;
+    \\
+    \\        function toggleGroups() {
+    \\            document.getElementById('groups-list').classList.toggle('open');
+    \\        }
+    \\
+    \\        function insertGroup(groupId) {
+    \\            const group = contactGroups[groupId];
+    \\            if (!group) return;
+    \\
+    \\            const toField = document.getElementById('compose-to');
+    \\            if (toField.value) {
+    \\                toField.value += ', ' + group.emails;
+    \\            } else {
+    \\                toField.value = group.emails;
+    \\            }
+    \\
+    \\            document.getElementById('groups-list').classList.remove('open');
+    \\            showToast('Added ' + group.name + ' to recipients', 'success');
+    \\        }
+    \\
+    \\        // Close groups dropdown when clicking outside
+    \\        document.addEventListener('click', function(e) {
+    \\            if (!e.target.closest('.groups-dropdown')) {
+    \\                document.getElementById('groups-list').classList.remove('open');
+    \\            }
+    \\        });
+    \\
+    \\        function toggleSchedulePicker() {
+    \\            const checkbox = document.getElementById('schedule-send');
+    \\            const picker = document.getElementById('schedule-picker');
+    \\            const display = document.getElementById('schedule-time-display');
+    \\
+    \\            if (checkbox.checked) {
+    \\                picker.classList.add('open');
+    \\                // Set default to 1 hour from now
+    \\                setSchedulePreset(1);
+    \\            } else {
+    \\                picker.classList.remove('open');
+    \\                display.style.display = 'none';
+    \\                scheduledTime = null;
+    \\            }
+    \\        }
+    \\
+    \\        function setSchedulePreset(hours) {
+    \\            const now = new Date();
+    \\            now.setHours(now.getHours() + hours);
+    \\
+    \\            // Format for datetime-local input
+    \\            const year = now.getFullYear();
+    \\            const month = String(now.getMonth() + 1).padStart(2, '0');
+    \\            const day = String(now.getDate()).padStart(2, '0');
+    \\            const hour = String(now.getHours()).padStart(2, '0');
+    \\            const minute = String(now.getMinutes()).padStart(2, '0');
+    \\
+    \\            document.getElementById('schedule-datetime').value = year + '-' + month + '-' + day + 'T' + hour + ':' + minute;
+    \\            updateScheduleDisplay();
+    \\        }
+    \\
+    \\        function updateScheduleDisplay() {
+    \\            const input = document.getElementById('schedule-datetime');
+    \\            const display = document.getElementById('schedule-time-display');
+    \\
+    \\            if (input.value) {
+    \\                scheduledTime = new Date(input.value);
+    \\                const options = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+    \\                display.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> ' + scheduledTime.toLocaleString('en-US', options);
+    \\                display.style.display = 'inline-flex';
+    \\            } else {
+    \\                display.style.display = 'none';
+    \\                scheduledTime = null;
+    \\            }
+    \\        }
+    \\
+    \\        // Modify send to handle scheduling and receipts
+    \\        const originalSendEmail = sendEmail;
+    \\        sendEmail = function() {
+    \\            const requestReceipt = document.getElementById('request-receipt').checked;
+    \\            const isScheduled = document.getElementById('schedule-send').checked;
+    \\
+    \\            if (isScheduled && scheduledTime) {
+    \\                // Schedule the email instead of sending immediately
+    \\                showToast('Email scheduled for ' + scheduledTime.toLocaleString(), 'success');
+    \\                closeCompose();
+    \\                return;
+    \\            }
+    \\
+    \\            if (requestReceipt) {
+    \\                showToast('Read receipt requested', 'success');
+    \\            }
+    \\
+    \\            // Call original send
+    \\            originalSendEmail();
     \\        };
     \\
     \\        function showToast(message, type) {
