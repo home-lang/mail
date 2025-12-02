@@ -3,6 +3,8 @@ const version_info = @import("../core/version.zig");
 const attachment_storage = @import("../storage/attachment_storage.zig");
 const email_threads = @import("../features/email_threads.zig");
 const inline_images = @import("../features/inline_images.zig");
+const email_templates = @import("../features/email_templates.zig");
+const email_signatures = @import("../features/email_signatures.zig");
 
 // =============================================================================
 // Webmail Client - Responsive Web Interface for Email
@@ -231,6 +233,8 @@ pub const WebmailHandler = struct {
     attachment_store: ?attachment_storage.AttachmentStorage,
     thread_manager: email_threads.ThreadManager,
     inline_store: inline_images.InlineImageStore,
+    template_manager: email_templates.TemplateManager,
+    signature_manager: email_signatures.SignatureManager,
 
     pub fn init(allocator: std.mem.Allocator, config: WebmailConfig) WebmailHandler {
         // Initialize attachment storage
@@ -248,6 +252,8 @@ pub const WebmailHandler = struct {
             .attachment_store = store,
             .thread_manager = email_threads.ThreadManager.init(allocator, .{}),
             .inline_store = inline_images.InlineImageStore.init(allocator, .{}),
+            .template_manager = email_templates.TemplateManager.init(allocator, .{}),
+            .signature_manager = email_signatures.SignatureManager.init(allocator, .{}),
         };
     }
 
@@ -265,6 +271,8 @@ pub const WebmailHandler = struct {
 
         self.thread_manager.deinit();
         self.inline_store.deinit();
+        self.template_manager.deinit();
+        self.signature_manager.deinit();
     }
 
     /// Handle HTTP request
@@ -310,6 +318,14 @@ pub const WebmailHandler = struct {
             return self.getInlineImage(endpoint[7..]);
         } else if (std.mem.eql(u8, endpoint, "inline-stats")) {
             return self.getInlineStats();
+        } else if (std.mem.eql(u8, endpoint, "templates")) {
+            return self.getTemplates();
+        } else if (std.mem.startsWith(u8, endpoint, "templates/")) {
+            return self.getTemplate(endpoint[10..]);
+        } else if (std.mem.eql(u8, endpoint, "signatures")) {
+            return self.getSignatures();
+        } else if (std.mem.startsWith(u8, endpoint, "signatures/")) {
+            return self.getSignature(endpoint[11..]);
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -325,6 +341,14 @@ pub const WebmailHandler = struct {
             return self.deleteAttachment(endpoint[12..]);
         } else if (std.mem.eql(u8, endpoint, "inline")) {
             return self.uploadInlineImage();
+        } else if (std.mem.eql(u8, endpoint, "templates")) {
+            return self.createTemplate();
+        } else if (std.mem.startsWith(u8, endpoint, "templates/apply/")) {
+            return self.applyTemplate(endpoint[16..]);
+        } else if (std.mem.eql(u8, endpoint, "signatures")) {
+            return self.createSignature();
+        } else if (std.mem.startsWith(u8, endpoint, "signatures/default/")) {
+            return self.setDefaultSignature(endpoint[19..]);
         }
         return self.serveError(404, "Endpoint not found");
     }
@@ -526,6 +550,193 @@ pub const WebmailHandler = struct {
         message_id: ?[]const u8,
     ) !void {
         try self.inline_store.store(content_id, filename, mime_type, data, message_id);
+    }
+
+    // =========================================================================
+    // Template API Methods
+    // =========================================================================
+
+    /// Get all templates
+    fn getTemplates(self: *WebmailHandler) ![]u8 {
+        const templates = self.template_manager.list(self.allocator) catch {
+            return self.serveError(500, "Failed to list templates");
+        };
+        defer self.allocator.free(templates);
+
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        errdefer buffer.deinit();
+        const writer = buffer.writer();
+
+        try writer.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"templates\":[");
+
+        for (templates, 0..) |*tmpl, i| {
+            if (i > 0) try writer.writeAll(",");
+            const json = tmpl.toJson(self.allocator) catch continue;
+            defer self.allocator.free(json);
+            try writer.writeAll(json);
+        }
+
+        const stats = self.template_manager.getStats();
+        try writer.print("],\"total\":{d},\"active\":{d}}}", .{ stats.total_templates, stats.active_templates });
+
+        return buffer.toOwnedSlice();
+    }
+
+    /// Get template by ID
+    fn getTemplate(self: *WebmailHandler, id: []const u8) ![]u8 {
+        if (self.template_manager.get(id)) |tmpl| {
+            const json = tmpl.toJson(self.allocator) catch {
+                return self.serveError(500, "Failed to serialize template");
+            };
+            defer self.allocator.free(json);
+
+            return std.fmt.allocPrint(self.allocator,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{s}", .{json});
+        }
+        return self.serveError(404, "Template not found");
+    }
+
+    /// Create a new template
+    fn createTemplate(self: *WebmailHandler) ![]u8 {
+        // Demo: create a sample template
+        const id = self.template_manager.create(
+            "Quick Response",
+            .quick_response,
+            "Re: {{subject}}",
+            "Hi {{name}},\n\nThank you for reaching out.\n\n{{message}}\n\nBest regards",
+            null,
+            "A quick response template",
+        ) catch |err| {
+            return switch (err) {
+                email_templates.TemplateError.StorageFull => self.serveError(429, "Template storage full"),
+                else => self.serveError(500, "Failed to create template"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 201 Created
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","status":"created"}}
+        , .{id});
+    }
+
+    /// Apply template with variables
+    fn applyTemplate(self: *WebmailHandler, id: []const u8) ![]u8 {
+        // Demo variables
+        const variables = [_]email_templates.TemplateManager.VariableValue{
+            .{ .name = "name", .value = "John" },
+            .{ .name = "subject", .value = "Your inquiry" },
+            .{ .name = "message", .value = "I'll get back to you shortly." },
+        };
+
+        const result = self.template_manager.apply(id, &variables) catch |err| {
+            return switch (err) {
+                email_templates.TemplateError.TemplateNotFound => self.serveError(404, "Template not found"),
+                else => self.serveError(500, "Failed to apply template"),
+            };
+        };
+        defer {
+            self.allocator.free(result.subject);
+            self.allocator.free(result.body_text);
+            if (result.body_html) |h| self.allocator.free(h);
+        }
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{"subject":"{s}","body_text":"{s}","body_html":null}}
+        , .{ result.subject, result.body_text });
+    }
+
+    // =========================================================================
+    // Signature API Methods
+    // =========================================================================
+
+    /// Get all signatures
+    fn getSignatures(self: *WebmailHandler) ![]u8 {
+        const signatures = self.signature_manager.list(self.allocator) catch {
+            return self.serveError(500, "Failed to list signatures");
+        };
+        defer self.allocator.free(signatures);
+
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        errdefer buffer.deinit();
+        const writer = buffer.writer();
+
+        try writer.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"signatures\":[");
+
+        for (signatures, 0..) |*sig, i| {
+            if (i > 0) try writer.writeAll(",");
+            const json = sig.toJson(self.allocator) catch continue;
+            defer self.allocator.free(json);
+            try writer.writeAll(json);
+        }
+
+        const stats = self.signature_manager.getStats();
+        try writer.print("],\"total\":{d},\"default_count\":{d}}}", .{ stats.total_signatures, stats.default_signatures });
+
+        return buffer.toOwnedSlice();
+    }
+
+    /// Get signature by ID
+    fn getSignature(self: *WebmailHandler, id: []const u8) ![]u8 {
+        if (self.signature_manager.get(id)) |sig| {
+            const json = sig.toJson(self.allocator) catch {
+                return self.serveError(500, "Failed to serialize signature");
+            };
+            defer self.allocator.free(json);
+
+            return std.fmt.allocPrint(self.allocator,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{s}", .{json});
+        }
+        return self.serveError(404, "Signature not found");
+    }
+
+    /// Create a new signature
+    fn createSignature(self: *WebmailHandler) ![]u8 {
+        // Demo: create a sample signature
+        const id = self.signature_manager.create(
+            "Professional",
+            "Best regards,\n\nJohn Doe\nSenior Developer\nAcme Corp\nPhone: (555) 123-4567",
+            "<div style=\"color:#333;\"><p>Best regards,</p><p><strong>John Doe</strong><br>Senior Developer<br>Acme Corp<br>Phone: (555) 123-4567</p></div>",
+            .{ .is_default = true },
+        ) catch |err| {
+            return switch (err) {
+                email_signatures.SignatureError.StorageFull => self.serveError(429, "Signature storage full"),
+                else => self.serveError(500, "Failed to create signature"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 201 Created
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","status":"created"}}
+        , .{id});
+    }
+
+    /// Set default signature
+    fn setDefaultSignature(self: *WebmailHandler, id: []const u8) ![]u8 {
+        self.signature_manager.setDefault(id) catch |err| {
+            return switch (err) {
+                email_signatures.SignatureError.SignatureNotFound => self.serveError(404, "Signature not found"),
+                else => self.serveError(500, "Failed to set default"),
+            };
+        };
+
+        return std.fmt.allocPrint(self.allocator,
+            \\HTTP/1.1 200 OK
+            \\Content-Type: application/json
+            \\
+            \\{{"id":"{s}","is_default":true}}
+        , .{id});
+    }
+
+    /// Get default signature for context
+    pub fn getDefaultSignature(self: *WebmailHandler, context: email_signatures.SignatureManager.SignatureContext) ?*const email_signatures.EmailSignature {
+        return self.signature_manager.getForContext(context, null);
     }
 
     /// Upload an attachment
@@ -1740,6 +1951,125 @@ const webmail_html =
     \\            gap: 8px;
     \\            margin-top: 16px;
     \\        }
+    \\        /* Templates & Signatures */
+    \\        .templates-btn, .signatures-btn {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 4px;
+    \\            padding: 6px 10px;
+    \\            border: 1px solid var(--border);
+    \\            background: var(--card-bg);
+    \\            border-radius: 4px;
+    \\            cursor: pointer;
+    \\            font-size: 0.8125rem;
+    \\            color: var(--text-muted);
+    \\        }
+    \\        .templates-btn:hover, .signatures-btn:hover {
+    \\            background: var(--primary-light);
+    \\            border-color: var(--primary);
+    \\            color: var(--primary);
+    \\        }
+    \\        .templates-modal, .signatures-modal {
+    \\            display: none;
+    \\            position: fixed;
+    \\            top: 50%;
+    \\            left: 50%;
+    \\            transform: translate(-50%, -50%);
+    \\            background: var(--card-bg);
+    \\            border-radius: 12px;
+    \\            box-shadow: var(--shadow-lg);
+    \\            padding: 20px;
+    \\            z-index: 400;
+    \\            width: 500px;
+    \\            max-width: 90vw;
+    \\            max-height: 80vh;
+    \\            overflow-y: auto;
+    \\        }
+    \\        .templates-modal.open, .signatures-modal.open { display: block; }
+    \\        .modal-header {
+    \\            display: flex;
+    \\            justify-content: space-between;
+    \\            align-items: center;
+    \\            margin-bottom: 16px;
+    \\        }
+    \\        .modal-header h3 { margin: 0; font-size: 1.1rem; }
+    \\        .template-list, .signature-list {
+    \\            display: flex;
+    \\            flex-direction: column;
+    \\            gap: 8px;
+    \\        }
+    \\        .template-item, .signature-item {
+    \\            display: flex;
+    \\            align-items: flex-start;
+    \\            gap: 12px;
+    \\            padding: 12px;
+    \\            border: 1px solid var(--border);
+    \\            border-radius: 8px;
+    \\            cursor: pointer;
+    \\            transition: all 0.2s;
+    \\        }
+    \\        .template-item:hover, .signature-item:hover {
+    \\            border-color: var(--primary);
+    \\            background: var(--primary-light);
+    \\        }
+    \\        .template-icon, .signature-icon {
+    \\            width: 40px;
+    \\            height: 40px;
+    \\            border-radius: 8px;
+    \\            background: var(--primary-light);
+    \\            color: var(--primary);
+    \\            display: flex;
+    \\            align-items: center;
+    \\            justify-content: center;
+    \\            flex-shrink: 0;
+    \\        }
+    \\        .template-info, .signature-info { flex: 1; min-width: 0; }
+    \\        .template-name, .signature-name {
+    \\            font-weight: 500;
+    \\            margin-bottom: 2px;
+    \\        }
+    \\        .template-desc, .signature-preview {
+    \\            font-size: 0.8125rem;
+    \\            color: var(--text-muted);
+    \\            white-space: nowrap;
+    \\            overflow: hidden;
+    \\            text-overflow: ellipsis;
+    \\        }
+    \\        .template-category {
+    \\            font-size: 0.6875rem;
+    \\            padding: 2px 6px;
+    \\            background: var(--bg);
+    \\            border-radius: 4px;
+    \\            color: var(--text-muted);
+    \\        }
+    \\        .signature-default {
+    \\            font-size: 0.6875rem;
+    \\            padding: 2px 6px;
+    \\            background: var(--success);
+    \\            color: white;
+    \\            border-radius: 4px;
+    \\        }
+    \\        .signature-toggle {
+    \\            display: flex;
+    \\            align-items: center;
+    \\            gap: 8px;
+    \\            padding: 8px 0;
+    \\            border-bottom: 1px solid var(--border);
+    \\            margin-bottom: 12px;
+    \\        }
+    \\        .signature-toggle label { font-size: 0.875rem; }
+    \\        .signature-toggle input[type="checkbox"] {
+    \\            width: 18px;
+    \\            height: 18px;
+    \\            accent-color: var(--primary);
+    \\        }
+    \\        .compose-extras {
+    \\            display: flex;
+    \\            gap: 8px;
+    \\            padding: 8px 0;
+    \\            border-top: 1px solid var(--border);
+    \\            margin-top: 8px;
+    \\        }
     \\    </style>
     \\</head>
     \\<body>
@@ -2046,6 +2376,26 @@ const webmail_html =
     \\                <div id="inline-images-preview" class="inline-images-preview"></div>
     \\                <div id="attachment-list" class="attachment-list"></div>
     \\                <textarea class="compose-editor" id="compose-body" placeholder="Write your message..."></textarea>
+    \\                <div class="compose-extras">
+    \\                    <button class="templates-btn" onclick="openTemplates()" title="Use Template">
+    \\                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+    \\                            <polyline points="14 2 14 8 20 8"/>
+    \\                            <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/>
+    \\                        </svg>
+    \\                        Templates
+    \\                    </button>
+    \\                    <button class="signatures-btn" onclick="openSignatures()" title="Insert Signature">
+    \\                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+    \\                        </svg>
+    \\                        Signature
+    \\                    </button>
+    \\                    <label style="display: flex; align-items: center; gap: 4px; margin-left: auto; font-size: 0.8125rem; color: var(--text-muted);">
+    \\                        <input type="checkbox" id="auto-signature" checked style="accent-color: var(--primary);">
+    \\                        Auto-insert signature
+    \\                    </label>
+    \\                </div>
     \\            </div>
     \\            <!-- Drop Zone Overlay -->
     \\            <div class="drop-zone-overlay" id="drop-zone-overlay">
@@ -2089,6 +2439,107 @@ const webmail_html =
     \\            </div>
     \\        </div>
     \\        <div class="contacts-list" id="contacts-list"></div>
+    \\    </div>
+    \\    <!-- Templates Modal -->
+    \\    <div class="templates-modal" id="templates-modal">
+    \\        <div class="modal-header">
+    \\            <h3>Choose Template</h3>
+    \\            <button class="icon-btn" onclick="closeTemplates()">
+    \\                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+    \\                </svg>
+    \\            </button>
+    \\        </div>
+    \\        <div class="template-list" id="template-list">
+    \\            <div class="template-item" onclick="useTemplate('vacation')">
+    \\                <div class="template-icon">
+    \\                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+    \\                </div>
+    \\                <div class="template-info">
+    \\                    <div class="template-name">Out of Office</div>
+    \\                    <div class="template-desc">Standard vacation auto-reply message</div>
+    \\                    <span class="template-category">Vacation</span>
+    \\                </div>
+    \\            </div>
+    \\            <div class="template-item" onclick="useTemplate('thankyou')">
+    \\                <div class="template-icon">
+    \\                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+    \\                </div>
+    \\                <div class="template-info">
+    \\                    <div class="template-name">Thank You</div>
+    \\                    <div class="template-desc">Quick thank you response</div>
+    \\                    <span class="template-category">Quick Response</span>
+    \\                </div>
+    \\            </div>
+    \\            <div class="template-item" onclick="useTemplate('meeting')">
+    \\                <div class="template-icon">
+    \\                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+    \\                </div>
+    \\                <div class="template-info">
+    \\                    <div class="template-name">Meeting Request</div>
+    \\                    <div class="template-desc">Request a meeting with date and time</div>
+    \\                    <span class="template-category">Form Letter</span>
+    \\                </div>
+    \\            </div>
+    \\            <div class="template-item" onclick="useTemplate('followup')">
+    \\                <div class="template-icon">
+    \\                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+    \\                </div>
+    \\                <div class="template-info">
+    \\                    <div class="template-name">Follow Up</div>
+    \\                    <div class="template-desc">Follow up on previous conversation</div>
+    \\                    <span class="template-category">Quick Response</span>
+    \\                </div>
+    \\            </div>
+    \\        </div>
+    \\    </div>
+    \\    <!-- Signatures Modal -->
+    \\    <div class="signatures-modal" id="signatures-modal">
+    \\        <div class="modal-header">
+    \\            <h3>Choose Signature</h3>
+    \\            <button class="icon-btn" onclick="closeSignatures()">
+    \\                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+    \\                </svg>
+    \\            </button>
+    \\        </div>
+    \\        <div class="signature-list" id="signature-list">
+    \\            <div class="signature-item" onclick="useSignature('professional')">
+    \\                <div class="signature-icon">
+    \\                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+    \\                </div>
+    \\                <div class="signature-info">
+    \\                    <div class="signature-name">Professional <span class="signature-default">Default</span></div>
+    \\                    <div class="signature-preview">Best regards, John Doe - Senior Developer - Acme Corp</div>
+    \\                </div>
+    \\            </div>
+    \\            <div class="signature-item" onclick="useSignature('simple')">
+    \\                <div class="signature-icon">
+    \\                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    \\                </div>
+    \\                <div class="signature-info">
+    \\                    <div class="signature-name">Simple</div>
+    \\                    <div class="signature-preview">Thanks, John</div>
+    \\                </div>
+    \\            </div>
+    \\            <div class="signature-item" onclick="useSignature('formal')">
+    \\                <div class="signature-icon">
+    \\                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+    \\                </div>
+    \\                <div class="signature-info">
+    \\                    <div class="signature-name">Formal</div>
+    \\                    <div class="signature-preview">Yours sincerely, John Doe, MBA - Director of Engineering</div>
+    \\                </div>
+    \\            </div>
+    \\        </div>
+    \\        <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border);">
+    \\            <button class="templates-btn" onclick="manageSignatures()" style="width: 100%; justify-content: center;">
+    \\                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    \\                    <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    \\                </svg>
+    \\                Manage Signatures
+    \\            </button>
+    \\        </div>
     \\    </div>
     \\    <!-- Insert Image Modal -->
     \\    <div class="insert-image-modal" id="insert-image-modal">
@@ -2980,6 +3431,126 @@ const webmail_html =
     \\                }
     \\            }
     \\        });
+    \\
+    \\        // =============================================
+    \\        // Templates & Signatures Functions
+    \\        // =============================================
+    \\
+    \\        // Templates data
+    \\        const templates = {
+    \\            vacation: {
+    \\                subject: 'Out of Office: {{original_subject}}',
+    \\                body: 'Hello,\\n\\nThank you for your email. I am currently out of the office from {{start_date}} to {{end_date}}.\\n\\nI will have limited access to email during this time. If your matter is urgent, please contact {{alternate_contact}}.\\n\\nI will respond to your email upon my return.\\n\\nBest regards,\\n{{sender_name}}'
+    \\            },
+    \\            thankyou: {
+    \\                subject: 'Re: {{original_subject}}',
+    \\                body: 'Hi {{recipient_name}},\\n\\nThank you for your message. I appreciate you taking the time to reach out.\\n\\n{{custom_message}}\\n\\nBest regards,\\n{{sender_name}}'
+    \\            },
+    \\            meeting: {
+    \\                subject: 'Meeting Request: {{meeting_topic}}',
+    \\                body: 'Hi {{recipient_name}},\\n\\nI would like to schedule a meeting to discuss {{meeting_topic}}.\\n\\nProposed time: {{proposed_time}}\\nDuration: {{duration}}\\nLocation: {{location}}\\n\\nPlease let me know if this works for you, or suggest an alternative time.\\n\\nBest regards,\\n{{sender_name}}'
+    \\            },
+    \\            followup: {
+    \\                subject: 'Following Up: {{original_subject}}',
+    \\                body: 'Hi {{recipient_name}},\\n\\nI wanted to follow up on our previous conversation regarding {{topic}}.\\n\\n{{followup_message}}\\n\\nPlease let me know if you have any questions.\\n\\nBest regards,\\n{{sender_name}}'
+    \\            }
+    \\        };
+    \\
+    \\        // Signatures data
+    \\        const signatures = {
+    \\            professional: {
+    \\                text: '\\n\\n--\\nBest regards,\\n\\nJohn Doe\\nSenior Developer\\nAcme Corp\\nPhone: (555) 123-4567\\nEmail: john.doe@acme.com',
+    \\                isDefault: true
+    \\            },
+    \\            simple: {
+    \\                text: '\\n\\n--\\nThanks,\\nJohn',
+    \\                isDefault: false
+    \\            },
+    \\            formal: {
+    \\                text: '\\n\\n--\\nYours sincerely,\\n\\nJohn Doe, MBA\\nDirector of Engineering\\nAcme Corporation\\n\\nConfidentiality Notice: This email may contain confidential information.',
+    \\                isDefault: false
+    \\            }
+    \\        };
+    \\
+    \\        let currentSignature = 'professional';
+    \\
+    \\        function openTemplates() {
+    \\            document.getElementById('templates-modal').classList.add('open');
+    \\        }
+    \\
+    \\        function closeTemplates() {
+    \\            document.getElementById('templates-modal').classList.remove('open');
+    \\        }
+    \\
+    \\        function useTemplate(templateId) {
+    \\            const template = templates[templateId];
+    \\            if (!template) return;
+    \\
+    \\            // Fill in subject if empty
+    \\            const subjectField = document.getElementById('compose-subject');
+    \\            if (!subjectField.value) {
+    \\                subjectField.value = template.subject.replace(/\\{\\{.*?\\}\\}/g, '...');
+    \\            }
+    \\
+    \\            // Fill in body
+    \\            const bodyField = document.getElementById('compose-body');
+    \\            bodyField.value = template.body.replace(/\\{\\{.*?\\}\\}/g, function(match) {
+    \\                const varName = match.slice(2, -2);
+    \\                return '[' + varName + ']';
+    \\            });
+    \\
+    \\            closeTemplates();
+    \\            showToast('Template applied! Fill in the bracketed fields.', 'success');
+    \\        }
+    \\
+    \\        function openSignatures() {
+    \\            document.getElementById('signatures-modal').classList.add('open');
+    \\        }
+    \\
+    \\        function closeSignatures() {
+    \\            document.getElementById('signatures-modal').classList.remove('open');
+    \\        }
+    \\
+    \\        function useSignature(signatureId) {
+    \\            const signature = signatures[signatureId];
+    \\            if (!signature) return;
+    \\
+    \\            currentSignature = signatureId;
+    \\
+    \\            const bodyField = document.getElementById('compose-body');
+    \\            // Remove any existing signature
+    \\            let body = bodyField.value;
+    \\            const sigIndex = body.lastIndexOf('\\n\\n--\\n');
+    \\            if (sigIndex !== -1) {
+    \\                body = body.substring(0, sigIndex);
+    \\            }
+    \\
+    \\            bodyField.value = body + signature.text;
+    \\
+    \\            closeSignatures();
+    \\            showToast('Signature inserted!', 'success');
+    \\        }
+    \\
+    \\        function manageSignatures() {
+    \\            closeSignatures();
+    \\            showToast('Signature management coming in settings', 'success');
+    \\        }
+    \\
+    \\        // Auto-insert signature when opening compose
+    \\        const originalOpenCompose = openCompose;
+    \\        openCompose = function() {
+    \\            originalOpenCompose();
+    \\
+    \\            // Auto-insert default signature if enabled
+    \\            const autoSig = document.getElementById('auto-signature');
+    \\            if (autoSig && autoSig.checked) {
+    \\                const bodyField = document.getElementById('compose-body');
+    \\                if (!bodyField.value && signatures[currentSignature]) {
+    \\                    bodyField.value = signatures[currentSignature].text.trim();
+    \\                    bodyField.setSelectionRange(0, 0); // Move cursor to start
+    \\                }
+    \\            }
+    \\        };
     \\
     \\        function showToast(message, type) {
     \\            const container = document.getElementById('toast-container');

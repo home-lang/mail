@@ -2,6 +2,72 @@
 
 ## Recent Updates 📝
 
+### v0.36.0 (2025-12-02) - Email Templates & Signatures 📝✒️
+- ✅ **Email Templates System**: Complete template engine (`src/features/email_templates.zig`)
+  - **Template Categories**:
+    - `vacation` - Out of office auto-reply
+    - `auto_reply` - Automatic responses
+    - `form_letter` - Formal letters
+    - `quick_response` - Fast replies
+    - `newsletter` - Email newsletters
+    - `notification` - System notifications
+    - `custom` - User-defined templates
+  - **Variable Substitution**:
+    - `{{variable_name}}` syntax
+    - Built-in variables: `{{date}}`, `{{time}}`, `{{year}}`
+    - Custom variables with defaults
+    - Automatic variable extraction
+  - **Template Manager**:
+    - Create, read, update, delete templates
+    - List by category
+    - Apply with variable substitution
+    - Usage tracking
+  - **Built-in Templates**:
+    - Out of Office (vacation)
+    - Thank You (quick response)
+    - Meeting Request (form letter)
+    - Follow Up (quick response)
+  - **API Endpoints**:
+    - `GET /webmail/api/templates` - List all
+    - `GET /webmail/api/templates/:id` - Get one
+    - `POST /webmail/api/templates` - Create new
+    - `POST /webmail/api/templates/apply/:id` - Apply with vars
+  - **Tests**: 4 unit tests
+
+- ✅ **Email Signatures System**: Complete signature management (`src/features/email_signatures.zig`)
+  - **Signature Features**:
+    - Plain text and HTML formats
+    - Multiple signatures per account
+    - Default signature selection
+    - Position control (bottom, above quote, below quote)
+    - Context-aware (new, reply, forward)
+  - **Signature Manager**:
+    - Create, update, delete signatures
+    - Set default signature
+    - Get by context (new/reply/forward)
+    - Apply to email body
+  - **Built-in Signatures**:
+    - Professional (with contact info)
+    - Simple (name only)
+    - Formal (with title and disclaimer)
+  - **API Endpoints**:
+    - `GET /webmail/api/signatures` - List all
+    - `GET /webmail/api/signatures/:id` - Get one
+    - `POST /webmail/api/signatures` - Create new
+    - `POST /webmail/api/signatures/default/:id` - Set default
+  - **Tests**: 5 unit tests
+
+- ✅ **Webmail UI Integration**:
+  - Templates button in compose extras
+  - Templates modal with category icons
+  - Variable placeholder display `[variable_name]`
+  - Signatures button in compose extras
+  - Signatures modal with preview
+  - Auto-insert signature checkbox
+  - Default signature on compose open
+  - Signature replacement detection
+  - Manage Signatures button
+
 ### v0.35.0 (2025-12-02) - Inline Image Support 🖼️
 - ✅ **Inline Image System**: Complete CID-based inline image handling (`src/features/inline_images.zig`)
   - **Content-ID Parsing**:
@@ -2054,7 +2120,7 @@ All research topics have been thoroughly investigated and documented in **docs/R
 ## Project Information
 
 **Last Updated**: 2025-12-02
-**Current Version**: v0.35.0
+**Current Version**: v0.36.0
 **Zig Version**: 0.15.1
 **License**: MIT
 
