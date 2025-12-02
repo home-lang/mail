@@ -26,17 +26,17 @@ pub const HotReloadManager = struct {
             .last_reload_time = time_compat.timestamp(),
             .reload_count = 0,
             .mutex = .{},
-            .callbacks = std.ArrayList(ConfigChangeCallback).init(allocator),
+            .callbacks = .{ .items = &.{}, .capacity = 0 },
         };
     }
 
     pub fn deinit(self: *HotReloadManager) void {
-        self.callbacks.deinit();
+        self.callbacks.deinit(self.allocator);
     }
 
     /// Register a callback to be notified when configuration changes
     pub fn registerCallback(self: *HotReloadManager, callback: ConfigChangeCallback) !void {
-        try self.callbacks.append(callback);
+        try self.callbacks.append(self.allocator, callback);
     }
 
     /// Check if reload is requested and perform the reload

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const io_compat = @import("io_compat.zig");
 
 /// Centralized Error Handling for SMTP Server
 /// Provides consistent error handling, logging, recovery, and reporting
@@ -352,7 +353,7 @@ pub const ErrorHandler = struct {
 
         // Build log message
         var buf: [1024]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         const writer = fbs.writer();
 
         writer.print("[{s}] ", .{@tagName(ctx.category)}) catch {};

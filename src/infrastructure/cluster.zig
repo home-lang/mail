@@ -134,7 +134,6 @@ const raft = @import("raft.zig");
 /// - Leader election with proper term-based voting
 /// - Log replication for distributed state
 /// - Heartbeat mechanism with configurable timeouts
-
 /// Cluster node information
 pub const ClusterNode = struct {
     id: []const u8,
@@ -190,10 +189,10 @@ pub const ClusterNode = struct {
     }
 };
 
-pub const NodeRole = enum {
-    leader, // Coordinates cluster activities
-    follower, // Regular worker node
-    candidate, // Node trying to become leader
+pub const NodeRole = enum(u8) {
+    leader = 0, // Coordinates cluster activities
+    follower = 1, // Regular worker node
+    candidate = 2, // Node trying to become leader
 
     pub fn toString(self: NodeRole) []const u8 {
         return switch (self) {
@@ -204,11 +203,11 @@ pub const NodeRole = enum {
     }
 };
 
-pub const NodeStatus = enum {
-    healthy,
-    degraded,
-    unhealthy,
-    disconnected,
+pub const NodeStatus = enum(u8) {
+    healthy = 0,
+    degraded = 1,
+    unhealthy = 2,
+    disconnected = 3,
 
     pub fn toString(self: NodeStatus) []const u8 {
         return switch (self) {
@@ -309,10 +308,9 @@ pub const ClusterManager = struct {
         if (config.enable_raft) {
             const raft_config = raft.RaftConfig{
                 .node_id = config.node_id,
-                .peers = &[_][]const u8{}, // Will be populated from cluster peers
-                .election_timeout_ms = config.raft_election_timeout_ms,
+                .election_timeout_min_ms = config.raft_election_timeout_ms,
+                .election_timeout_max_ms = config.raft_election_timeout_ms * 2,
                 .heartbeat_interval_ms = config.raft_heartbeat_interval_ms,
-                .max_log_entries = 10000,
                 .snapshot_threshold = 5000,
             };
             manager.raft_node = try raft.RaftNode.init(allocator, raft_config);
@@ -407,13 +405,13 @@ pub const ClusterManager = struct {
                 std.log.err("Health check failed: {}", .{err});
             };
 
-            std.time.sleep(self.config.heartbeat_interval_ms * std.time.ns_per_ms);
+            time_compat.sleepMs(self.config.heartbeat_interval_ms);
         }
     }
 
     /// Send heartbeat to all nodes
     fn sendHeartbeat(self: *ClusterManager) !void {
-        self.local_node.last_heartbeat = time_compat.timestamp();
+        self.local_node.last_heartbeat.store(time_compat.timestamp(), .release);
 
         self.nodes_mutex.lock();
         defer self.nodes_mutex.unlock();
@@ -437,10 +435,10 @@ pub const ClusterManager = struct {
         var iter = self.nodes.iterator();
         while (iter.next()) |entry| {
             const node = entry.value_ptr.*;
-            const elapsed = now - node.last_heartbeat;
+            const elapsed = now - node.last_heartbeat.load(.acquire);
 
             if (elapsed > timeout) {
-                node.status = .disconnected;
+                node.status.store(.disconnected, .release);
                 std.log.warn("Node {s} marked as disconnected (last heartbeat: {d}s ago)", .{
                     node.id,
                     elapsed,
@@ -518,9 +516,8 @@ pub const ClusterManager = struct {
         // Use Raft consensus if enabled
         if (self.raft_enabled and self.raft_node != null) {
             std.log.info("Triggering Raft leader election", .{});
-            // Raft handles election internally via its tick mechanism
-            // Just mark that we need an election
-            self.raft_node.?.tick();
+            // Raft handles election internally via its ticker loop
+            // The election will be triggered automatically when timeout occurs
             return;
         }
 

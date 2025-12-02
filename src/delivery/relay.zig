@@ -1,4 +1,6 @@
 const std = @import("std");
+const posix = std.posix;
+const time_compat = @import("../core/time_compat.zig");
 
 /// SMTP relay client for forwarding messages to other servers
 pub const SMTPRelay = struct {
@@ -30,15 +32,25 @@ pub const SMTPRelay = struct {
         to: []const u8,
         data: []const u8,
     ) !void {
-        // Connect to relay server
-        const address = try std.net.Address.parseIp(self.host, self.port);
-        const stream = try std.net.tcpConnectToAddress(address);
-        defer stream.close();
+        // Parse IP address
+        const ip = parseIpv4(self.host) orelse return error.InvalidAddress;
+
+        // Create socket
+        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        defer posix.close(fd);
+
+        // Connect
+        const sockaddr = posix.sockaddr.in{
+            .family = posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, self.port),
+            .addr = std.mem.bytesToValue(u32, &ip),
+        };
+        try posix.connect(fd, @ptrCast(&sockaddr), @sizeOf(posix.sockaddr.in));
 
         var buf: [1024]u8 = undefined;
 
         // Read greeting
-        const greeting = try self.readResponse(stream, &buf);
+        const greeting = try self.readResponse(fd, &buf);
         if (!std.mem.startsWith(u8, greeting, "220")) {
             return error.InvalidGreeting;
         }
@@ -46,9 +58,9 @@ pub const SMTPRelay = struct {
         // EHLO
         const ehlo_cmd = try std.fmt.allocPrint(self.allocator, "EHLO {s}\r\n", .{self.our_hostname});
         defer self.allocator.free(ehlo_cmd);
-        _ = try stream.write(ehlo_cmd);
+        _ = try posix.write(fd, ehlo_cmd);
 
-        const ehlo_response = try self.readResponse(stream, &buf);
+        const ehlo_response = try self.readResponse(fd, &buf);
         if (!std.mem.startsWith(u8, ehlo_response, "250")) {
             return error.EhloFailed;
         }
@@ -56,9 +68,9 @@ pub const SMTPRelay = struct {
         // MAIL FROM
         const mail_cmd = try std.fmt.allocPrint(self.allocator, "MAIL FROM:<{s}>\r\n", .{from});
         defer self.allocator.free(mail_cmd);
-        _ = try stream.write(mail_cmd);
+        _ = try posix.write(fd, mail_cmd);
 
-        const mail_response = try self.readResponse(stream, &buf);
+        const mail_response = try self.readResponse(fd, &buf);
         if (!std.mem.startsWith(u8, mail_response, "250")) {
             return error.MailFromFailed;
         }
@@ -66,43 +78,70 @@ pub const SMTPRelay = struct {
         // RCPT TO
         const rcpt_cmd = try std.fmt.allocPrint(self.allocator, "RCPT TO:<{s}>\r\n", .{to});
         defer self.allocator.free(rcpt_cmd);
-        _ = try stream.write(rcpt_cmd);
+        _ = try posix.write(fd, rcpt_cmd);
 
-        const rcpt_response = try self.readResponse(stream, &buf);
+        const rcpt_response = try self.readResponse(fd, &buf);
         if (!std.mem.startsWith(u8, rcpt_response, "250")) {
             return error.RcptToFailed;
         }
 
         // DATA
-        _ = try stream.write("DATA\r\n");
-        const data_response = try self.readResponse(stream, &buf);
+        _ = try posix.write(fd, "DATA\r\n");
+        const data_response = try self.readResponse(fd, &buf);
         if (!std.mem.startsWith(u8, data_response, "354")) {
             return error.DataFailed;
         }
 
         // Send message data
-        _ = try stream.write(data);
+        _ = try posix.write(fd, data);
         if (!std.mem.endsWith(u8, data, "\r\n.\r\n")) {
-            _ = try stream.write("\r\n.\r\n");
+            _ = try posix.write(fd, "\r\n.\r\n");
         }
 
-        const send_response = try self.readResponse(stream, &buf);
+        const send_response = try self.readResponse(fd, &buf);
         if (!std.mem.startsWith(u8, send_response, "250")) {
             return error.MessageSendFailed;
         }
 
         // QUIT
-        _ = try stream.write("QUIT\r\n");
-        _ = try self.readResponse(stream, &buf);
+        _ = try posix.write(fd, "QUIT\r\n");
+        _ = try self.readResponse(fd, &buf);
     }
 
-    fn readResponse(self: *SMTPRelay, stream: std.net.Stream, buf: []u8) ![]const u8 {
+    fn readResponse(self: *SMTPRelay, fd: posix.socket_t, buf: []u8) ![]const u8 {
         _ = self;
-        const bytes_read = try stream.read(buf);
+        const bytes_read = try posix.read(fd, buf);
         if (bytes_read == 0) {
             return error.ConnectionClosed;
         }
         return buf[0..bytes_read];
+    }
+
+    fn parseIpv4(s: []const u8) ?[4]u8 {
+        var result: [4]u8 = undefined;
+        var idx: usize = 0;
+        var octet: u16 = 0;
+        var digits: u8 = 0;
+
+        for (s) |c| {
+            if (c == '.') {
+                if (digits == 0 or idx >= 3) return null;
+                result[idx] = @intCast(octet);
+                idx += 1;
+                octet = 0;
+                digits = 0;
+            } else if (c >= '0' and c <= '9') {
+                octet = octet * 10 + (c - '0');
+                if (octet > 255) return null;
+                digits += 1;
+                if (digits > 3) return null;
+            } else {
+                return null;
+            }
+        }
+        if (digits == 0 or idx != 3) return null;
+        result[3] = @intCast(octet);
+        return result;
     }
 };
 
@@ -153,7 +192,7 @@ pub const RelayWorker = struct {
                 std.log.info("Successfully relayed message {s}", .{msg.id});
             } else {
                 // No messages, sleep for a bit
-                std.time.sleep(self.poll_interval_ms * std.time.ns_per_ms);
+                time_compat.sleepMs(self.poll_interval_ms);
             }
         }
     }

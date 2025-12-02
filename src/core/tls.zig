@@ -1,6 +1,6 @@
 const std = @import("std");
 const time_compat = @import("time_compat.zig");
-const net = std.net;
+const net = std.Io.net;
 const logger = @import("logger.zig");
 const tls = @import("tls");
 const cert_validator = @import("cert_validator.zig");
@@ -477,7 +477,7 @@ pub const TlsContext = struct {
         else
             try std.fs.cwd().realpath(key_path, &key_path_buf);
 
-        const cert_key = tls.config.CertKeyPair.fromFilePathAbsolute(
+        const cert_key = tls.config.CertKeyPair.fromFilePathAbsoluteSync(
             self.allocator,
             abs_cert_path,
             abs_key_path,
@@ -494,19 +494,45 @@ pub const TlsContext = struct {
 /// TLS connection wrapper
 /// Note: Buffers are owned by caller (Session), not by TlsConnection
 pub const TlsConnection = struct {
-    conn: tls.Connection,
+    conn: ?tls.Connection,
+    cipher: ?tls.Cipher,
+
+    pub fn initWithConnection(conn: tls.Connection) TlsConnection {
+        return .{
+            .conn = conn,
+            .cipher = null,
+        };
+    }
+
+    pub fn initWithCipher(cipher: tls.Cipher) TlsConnection {
+        return .{
+            .conn = null,
+            .cipher = cipher,
+        };
+    }
 
     pub fn deinit(self: *TlsConnection) void {
-        self.conn.close() catch {};
-        // Note: Buffers are freed by Session, not here
+        if (self.conn) |*c| {
+            c.close() catch {};
+        }
+        self.conn = null;
+        self.cipher = null;
     }
 
     pub fn read(self: *TlsConnection, buffer: []u8) !usize {
-        return self.conn.read(buffer);
+        if (self.conn) |*c| {
+            return c.read(buffer);
+        }
+        // Cipher-only mode not yet fully implemented
+        return error.TlsNotActive;
     }
 
     pub fn write(self: *TlsConnection, data: []const u8) !usize {
-        return self.conn.write(data);
+        if (self.conn) |*c| {
+            return c.write(data);
+        }
+        // Cipher-only mode not yet fully implemented
+        return error.TlsNotActive;
     }
 };
 
@@ -1496,9 +1522,8 @@ pub const TlsAlert = struct {
         return .{
             21, // Alert content type
             0x03, 0x03, // Version (TLS 1.2 for compatibility)
-            0x00, 0x02, // Length
-            @intFromEnum(self.level),
-            @intFromEnum(self.description),
+            0x00,                     0x02, // Length
+            @intFromEnum(self.level), @intFromEnum(self.description),
         };
     }
 

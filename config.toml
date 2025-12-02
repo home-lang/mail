@@ -1,0 +1,57 @@
+# SMTP Server Configuration
+# Copy this file to config.toml and customize for your environment
+#
+# Configuration priority (highest to lowest):
+# 1. Command-line arguments
+# 2. Environment variables (SMTP_*)
+# 3. Configuration file (this file)
+# 4. Profile defaults (set via SMTP_PROFILE env var)
+
+[server]
+# Network binding
+host = "0.0.0.0"
+port = 2525
+hostname = "mail.example.com"
+
+# Connection limits
+max_connections = 1000
+max_message_size = 26214400  # 25MB
+max_recipients = 100
+
+[timeouts]
+# All values in seconds
+connection = 300       # General connection timeout
+data = 600            # DATA command timeout (needs longer for large emails)
+command = 60          # Timeout between commands
+greeting = 30         # Timeout for initial greeting
+
+[tls]
+enabled = false
+cert_path = "/etc/ssl/certs/mail.pem"
+key_path = "/etc/ssl/private/mail.key"
+
+[auth]
+enabled = true
+
+[rate_limit]
+per_ip = 100          # Requests per hour per IP
+per_user = 500        # Requests per hour per authenticated user
+cleanup_interval = 3600  # Cleanup interval in seconds
+
+[webhook]
+enabled = false
+url = "https://your-webhook-endpoint.com/email"
+
+[antispam]
+dnsbl = false         # DNS-based blacklist checking
+greylist = false      # Greylisting for spam prevention
+
+[observability]
+tracing = false                    # OpenTelemetry tracing
+service_name = "smtp-server"       # Service name for traces
+json_logging = false               # JSON format for log output
+
+# Profile-specific overrides can be set via environment:
+# SMTP_PROFILE=production  (uses production defaults)
+# SMTP_PROFILE=development (uses development defaults)
+# SMTP_PROFILE=testing (uses testing defaults)

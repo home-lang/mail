@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const io_compat = @import("io_compat.zig");
 
 /// Centralized Logger for SMTP Server
 /// Replaces all std.debug.print with structured, configurable logging
@@ -243,7 +244,7 @@ pub const Logger = struct {
         defer self.mutex.unlock();
 
         var buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         const writer = fbs.writer();
 
         switch (self.config.format) {
@@ -346,7 +347,7 @@ pub const Logger = struct {
         try writer.writeAll("\"message\":\"");
         // Escape the formatted message
         var msg_buf: [2048]u8 = undefined;
-        var msg_fbs = std.io.fixedBufferStream(&msg_buf);
+        var msg_fbs = io_compat.fixedBufferStream(&msg_buf);
         try msg_fbs.writer().print(fmt, args);
         const msg = msg_fbs.getWritten();
         for (msg) |c| {

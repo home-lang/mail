@@ -99,18 +99,15 @@ fn exportCommand(manager: *gdpr.GDPRManager, allocator: std.mem.Allocator, args:
         const file = try std.fs.cwd().createFile(path, .{});
         defer file.close();
 
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(allocator);
-        try export_data.toJSON(buffer.writer(allocator));
-        try file.writeAll(buffer.items);
+        const json_str = try export_data.toJSONString(allocator);
+        defer allocator.free(json_str);
+        try file.writeAll(json_str);
 
         std.debug.print("\nData exported to: {s}\n", .{path});
     } else {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(allocator);
-
-        try export_data.toJSON(buffer.writer(allocator));
-        std.debug.print("\nJSON Output:\n{s}\n", .{buffer.items});
+        const json_str = try export_data.toJSONString(allocator);
+        defer allocator.free(json_str);
+        std.debug.print("\nJSON Output:\n{s}\n", .{json_str});
     }
 
     std.debug.print("\n✓ Export completed successfully\n", .{});

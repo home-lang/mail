@@ -1,6 +1,6 @@
 const std = @import("std");
 const time_compat = @import("time_compat.zig");
-const net = std.net;
+const socket = @import("socket_compat.zig");
 const config = @import("config.zig");
 const auth = @import("../auth/auth.zig");
 const logger = @import("logger.zig");
@@ -36,9 +36,17 @@ const SessionState = enum {
 
 /// Connection wrapper that abstracts TLS and plain TCP
 const ConnectionWrapper = struct {
-    tcp_stream: net.Stream,
+    tcp_conn: socket.Connection,
     tls_conn: ?tls_mod.TlsConnection,
     using_tls: bool,
+
+    pub fn init(tcp_conn: socket.Connection) ConnectionWrapper {
+        return .{
+            .tcp_conn = tcp_conn,
+            .tls_conn = null,
+            .using_tls = false,
+        };
+    }
 
     pub fn read(self: *ConnectionWrapper, buffer: []u8) !usize {
         if (self.using_tls) {
@@ -47,7 +55,7 @@ const ConnectionWrapper = struct {
             }
             return error.TlsNotActive;
         }
-        return self.tcp_stream.read(buffer);
+        return self.tcp_conn.read(buffer);
     }
 
     pub fn write(self: *ConnectionWrapper, data: []const u8) !usize {
@@ -57,7 +65,7 @@ const ConnectionWrapper = struct {
             }
             return error.TlsNotActive;
         }
-        return self.tcp_stream.write(data);
+        return self.tcp_conn.write(data);
     }
 
     pub fn upgradeToTls(self: *ConnectionWrapper, tls_conn: tls_mod.TlsConnection) void {
@@ -65,18 +73,23 @@ const ConnectionWrapper = struct {
         self.using_tls = true;
     }
 
+    pub fn upgradeWithCipher(self: *ConnectionWrapper, cipher: @import("tls").Cipher) void {
+        self.tls_conn = tls_mod.TlsConnection.initWithCipher(cipher);
+        self.using_tls = true;
+    }
+
     pub fn deinitTls(self: *ConnectionWrapper) void {
         if (self.tls_conn) |*conn| {
-            var c = conn.*;
-            c.deinit();
+            conn.deinit();
             self.tls_conn = null;
         }
+        self.using_tls = false;
     }
 };
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
-    connection: net.Server.Connection,
+    connection: socket.Connection,
     conn_wrapper: ConnectionWrapper,
     config: config.Config,
     state: SessionState,
@@ -104,7 +117,7 @@ pub const Session = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        connection: net.Server.Connection,
+        connection: socket.Connection,
         cfg: config.Config,
         log: *logger.Logger,
         remote_addr: []const u8,
@@ -117,11 +130,7 @@ pub const Session = struct {
         return Session{
             .allocator = allocator,
             .connection = connection,
-            .conn_wrapper = ConnectionWrapper{
-                .tcp_stream = connection.stream,
-                .tls_conn = null,
-                .using_tls = false,
-            },
+            .conn_wrapper = ConnectionWrapper.init(connection),
             .config = cfg,
             .state = .Initial,
             .mail_from = null,
@@ -375,22 +384,43 @@ pub const Session = struct {
         var addr: []const u8 = undefined;
         var declared_size: ?usize = null;
 
-        if (std.mem.indexOf(u8, addr_part, " SIZE=")) |size_pos| {
-            // SIZE parameter present
-            addr = std.mem.trim(u8, addr_part[0..size_pos], " \t<>");
-            const size_part = addr_part[size_pos + 6 ..];
+        // First extract the address between < and >
+        const addr_start = std.mem.indexOf(u8, addr_part, "<");
+        const addr_end = std.mem.indexOf(u8, addr_part, ">");
 
-            // Parse size value
-            var size_end: usize = 0;
-            while (size_end < size_part.len and std.ascii.isDigit(size_part[size_end])) {
-                size_end += 1;
-            }
+        if (addr_start != null and addr_end != null and addr_end.? > addr_start.?) {
+            addr = addr_part[addr_start.? + 1 .. addr_end.?];
 
-            if (size_end > 0) {
-                declared_size = std.fmt.parseInt(usize, size_part[0..size_end], 10) catch null;
+            // Check for SIZE parameter after the address
+            const after_addr = addr_part[addr_end.? + 1 ..];
+            if (std.mem.indexOf(u8, after_addr, "SIZE=")) |size_pos| {
+                const size_part = after_addr[size_pos + 5 ..];
+                var size_end: usize = 0;
+                while (size_end < size_part.len and std.ascii.isDigit(size_part[size_end])) {
+                    size_end += 1;
+                }
+                if (size_end > 0) {
+                    declared_size = std.fmt.parseInt(usize, size_part[0..size_end], 10) catch null;
+                }
             }
         } else {
+            // Fallback: trim the whole thing
             addr = std.mem.trim(u8, addr_part, " \t<>");
+            // Still check for SIZE
+            if (std.mem.indexOf(u8, addr, " ")) |space_pos| {
+                const rest = addr[space_pos..];
+                addr = addr[0..space_pos];
+                if (std.mem.indexOf(u8, rest, "SIZE=")) |size_pos| {
+                    const size_part = rest[size_pos + 5 ..];
+                    var size_end: usize = 0;
+                    while (size_end < size_part.len and std.ascii.isDigit(size_part[size_end])) {
+                        size_end += 1;
+                    }
+                    if (size_end > 0) {
+                        declared_size = std.fmt.parseInt(usize, size_part[0..size_end], 10) catch null;
+                    }
+                }
+            }
         }
 
         if (addr.len == 0) {
@@ -493,12 +523,12 @@ pub const Session = struct {
         var prev_was_crlf = false;
 
         // Start DATA timeout timer
-        const data_start_time = std.time.milliTimestamp();
+        const data_start_time = time_compat.milliTimestamp();
         const data_timeout_ms = @as(i64, self.config.data_timeout_seconds) * 1000;
 
         while (true) {
             // Check if DATA timeout has been exceeded
-            const elapsed_ms = std.time.milliTimestamp() - data_start_time;
+            const elapsed_ms = time_compat.milliTimestamp() - data_start_time;
             if (elapsed_ms > data_timeout_ms) {
                 self.logger.warn("DATA timeout exceeded for {s} after {d}ms", .{ self.remote_addr, elapsed_ms });
                 try self.sendResponse(writer, 451, "DATA timeout - message transfer took too long", null);
@@ -517,18 +547,17 @@ pub const Session = struct {
                 line_pos = 0;
                 const trimmed = line;
 
-            // Check for end of data (.)
-            if (trimmed.len == 1 and trimmed[0] == '.') {
-                if (prev_was_crlf or message_data.items.len == 0) {
+                // Check for end of data (single dot on a line by itself)
+                if (trimmed.len == 1 and trimmed[0] == '.') {
+                    // End of message data
                     break;
                 }
-            }
 
-            // Handle transparency (remove leading dot if line starts with ..)
-            const data_line = if (trimmed.len > 1 and trimmed[0] == '.' and trimmed[1] == '.')
-                trimmed[1..]
-            else
-                trimmed;
+                // Handle transparency (remove leading dot if line starts with ..)
+                const data_line = if (trimmed.len > 1 and trimmed[0] == '.' and trimmed[1] == '.')
+                    trimmed[1..]
+                else
+                    trimmed;
 
                 try message_data.appendSlice(self.allocator, data_line);
                 try message_data.append(self.allocator, '\n');
@@ -817,9 +846,10 @@ pub const Session = struct {
 
         self.logger.info("STARTTLS command accepted - starting TLS handshake", .{});
 
+        // Perform TLS handshake using non-blocking API
         const tls = @import("tls");
 
-        // Load CertKeyPair fresh for this handshake with absolute paths
+        // Load certificate and key
         const cert_path = self.tls_context.?.config.cert_path orelse return error.TlsNotConfigured;
         const key_path = self.tls_context.?.config.key_path orelse return error.TlsNotConfigured;
 
@@ -830,14 +860,20 @@ pub const Session = struct {
         const abs_cert_path = if (std.fs.path.isAbsolute(cert_path))
             cert_path
         else
-            try std.fs.cwd().realpath(cert_path, &cert_path_buf);
+            std.fs.cwd().realpath(cert_path, &cert_path_buf) catch {
+                self.logger.err("Failed to resolve cert path: {s}", .{cert_path});
+                return error.InvalidCertificate;
+            };
 
         const abs_key_path = if (std.fs.path.isAbsolute(key_path))
             key_path
         else
-            try std.fs.cwd().realpath(key_path, &key_path_buf);
+            std.fs.cwd().realpath(key_path, &key_path_buf) catch {
+                self.logger.err("Failed to resolve key path: {s}", .{key_path});
+                return error.InvalidCertificate;
+            };
 
-        var cert_key = tls.config.CertKeyPair.fromFilePathAbsolute(
+        var cert_key = tls.config.CertKeyPair.fromFilePathAbsoluteSync(
             self.allocator,
             abs_cert_path,
             abs_key_path,
@@ -847,55 +883,60 @@ pub const Session = struct {
         };
         defer cert_key.deinit(self.allocator);
 
-        // Allocate TLS I/O buffers at session scope
-        const input_buf = try self.allocator.alloc(u8, tls.input_buffer_len);
-        errdefer self.allocator.free(input_buf);
+        // Use non-blocking TLS handshake
+        var server_hs = tls.nonblock.Server.init(.{ .auth = &cert_key });
 
-        const output_buf = try self.allocator.alloc(u8, tls.output_buffer_len);
-        errdefer self.allocator.free(output_buf);
+        // Buffers for TLS handshake
+        var recv_buf: [tls.max_ciphertext_record_len]u8 = undefined;
+        var send_buf: [tls.max_ciphertext_record_len]u8 = undefined;
 
-        // Create heap-allocated reader/writer that persist for session lifetime
-        // net.Stream.reader() and .writer() take buffer parameters
-        const ReaderType = @TypeOf(self.connection.stream.reader(input_buf));
-        const WriterType = @TypeOf(self.connection.stream.writer(output_buf));
+        // Perform handshake loop
+        var recv_pos: usize = 0;
+        while (!server_hs.done()) {
+            // Read data from client
+            const bytes_read = self.conn_wrapper.read(recv_buf[recv_pos..]) catch |err| {
+                self.logger.err("TLS handshake read error: {}", .{err});
+                return err;
+            };
 
-        const reader_ptr = try self.allocator.create(ReaderType);
-        errdefer self.allocator.destroy(reader_ptr);
-        reader_ptr.* = self.connection.stream.reader(input_buf);
+            if (bytes_read == 0) {
+                self.logger.err("TLS handshake: connection closed", .{});
+                return error.ConnectionClosed;
+            }
 
-        const writer_ptr = try self.allocator.create(WriterType);
-        errdefer self.allocator.destroy(writer_ptr);
-        writer_ptr.* = self.connection.stream.writer(output_buf);
+            recv_pos += bytes_read;
 
-        // Get Io.Reader and Io.Writer interfaces from the reader/writer structures
-        const reader_interface = if (@hasField(ReaderType, "interface"))
-            &reader_ptr.interface
-        else
-            reader_ptr.interface();
-        const writer_interface = &writer_ptr.interface;
+            // Process handshake
+            const result = server_hs.run(recv_buf[0..recv_pos], &send_buf) catch |err| {
+                self.logger.err("TLS handshake error: {}", .{err});
+                return error.TlsHandshakeFailed;
+            };
 
-        // Perform TLS handshake using the interfaces (already pointers)
-        const tls_conn = tls.server(reader_interface, writer_interface, .{
-            .auth = &cert_key,
-        }) catch |err| {
-            self.logger.err("TLS handshake failed: {}", .{err});
-            self.allocator.destroy(writer_ptr);
-            self.allocator.destroy(reader_ptr);
-            self.allocator.free(output_buf);
-            self.allocator.free(input_buf);
-            return err;
+            // Send response if any
+            if (result.send.len > 0) {
+                _ = self.conn_wrapper.write(result.send) catch |err| {
+                    self.logger.err("TLS handshake write error: {}", .{err});
+                    return err;
+                };
+            }
+
+            // Shift consumed data
+            if (result.recv_pos > 0) {
+                std.mem.copyForwards(u8, &recv_buf, recv_buf[result.recv_pos..recv_pos]);
+                recv_pos -= result.recv_pos;
+            }
+        }
+
+        // Get the cipher from completed handshake
+        const cipher = server_hs.cipher() orelse {
+            self.logger.err("TLS handshake completed but no cipher available", .{});
+            return error.TlsHandshakeFailed;
         };
 
         self.logger.info("TLS handshake successful", .{});
 
-        // Store everything in session for lifetime management
-        self.tls_input_buf = input_buf;
-        self.tls_output_buf = output_buf;
-        self.tls_reader_info = .{ .ptr = reader_ptr, .size = @sizeOf(ReaderType), .alignment = @alignOf(ReaderType) };
-        self.tls_writer_info = .{ .ptr = writer_ptr, .size = @sizeOf(WriterType), .alignment = @alignOf(WriterType) };
-
-        // Successfully upgraded to TLS - update the connection wrapper
-        self.conn_wrapper.upgradeToTls(tls_mod.TlsConnection{ .conn = tls_conn });
+        // Upgrade connection with the cipher
+        self.conn_wrapper.upgradeWithCipher(cipher);
 
         // Reset session state after TLS upgrade as per RFC
         self.state = .Initial;
@@ -928,8 +969,7 @@ pub const Session = struct {
             var extra_sanitized_buf: [256]u8 = undefined;
             const sanitized_extra = sanitizeForHeader(ext, &extra_sanitized_buf);
             break :blk try std.fmt.bufPrint(&response_buf, "{d} {s} {s}\r\n", .{ code, sanitized_message, sanitized_extra });
-        } else
-            try std.fmt.bufPrint(&response_buf, "{d} {s}\r\n", .{ code, sanitized_message });
+        } else try std.fmt.bufPrint(&response_buf, "{d} {s}\r\n", .{ code, sanitized_message });
 
         _ = try self.conn_wrapper.write(response);
         _ = writer;
@@ -949,7 +989,7 @@ pub const Session = struct {
         };
 
         // Generate unique filename based on timestamp
-        const timestamp = std.time.milliTimestamp();
+        const timestamp = time_compat.milliTimestamp();
         const filename = try std.fmt.allocPrint(self.allocator, "mail/new/{d}.eml", .{timestamp});
         defer self.allocator.free(filename);
 

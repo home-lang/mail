@@ -30,12 +30,12 @@ fn reloadConfigCallback() void {
     }
 }
 
-fn signalHandler(sig: i32) callconv(.c) void {
+fn signalHandler(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
     shutdown_requested.store(true, .release);
 }
 
-fn reloadHandler(sig: i32) callconv(.c) void {
+fn reloadHandler(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
     reload_requested.store(true, .release);
 }
@@ -193,7 +193,7 @@ pub fn main() !void {
 
         // Add default alert rules
         var default_rules = try alerting.createDefaultRules(allocator);
-        defer default_rules.deinit();
+        defer default_rules.deinit(allocator);
         for (default_rules.items) |rule| {
             try alert_manager.?.addRule(rule);
         }
@@ -257,19 +257,12 @@ pub fn main() !void {
     defer if (cluster_manager) |cm| cm.deinit();
 
     // Initialize multi-tenancy if enabled
-    var tenant_manager: ?*multitenancy.TenantManager = null;
-    const enable_multitenancy = std.posix.getenv("SMTP_MULTITENANCY_ENABLED") != null;
-
-    if (enable_multitenancy) {
-        tenant_manager = try allocator.create(multitenancy.TenantManager);
-        tenant_manager.?.* = multitenancy.TenantManager.init(allocator);
-
-        log.info("Multi-tenancy enabled", .{});
+    // Note: MultiTenancyManager requires a TenantDB - disabled for now
+    const tenant_manager: ?*multitenancy.MultiTenancyManager = null;
+    if (std.posix.getenv("SMTP_MULTITENANCY_ENABLED") != null) {
+        log.info("Multi-tenancy requested but not yet configured", .{});
     }
-    defer if (tenant_manager) |tm| {
-        tm.deinit();
-        allocator.destroy(tm);
-    };
+    // tenant_manager is used in logging below
 
     // Create and start SMTP server
     var server = try smtp.Server.init(allocator, cfg, &log, db_ptr, auth_ptr, greylist_ptr);
@@ -278,7 +271,7 @@ pub fn main() !void {
     // Log startup summary
     log.info("Starting SMTP server...", .{});
     log.info("  Cluster mode: {}", .{enable_cluster});
-    log.info("  Multi-tenancy: {}", .{enable_multitenancy});
+    log.info("  Multi-tenancy: {}", .{tenant_manager != null});
     log.info("  Metrics: {}", .{smtp_metrics != null});
     log.info("  Alerting: {}", .{alert_manager != null});
 

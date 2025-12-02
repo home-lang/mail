@@ -28,7 +28,6 @@ const metrics = @import("metrics.zig");
 ///     .message = "Bounce rate is 15%, threshold is 5%",
 /// });
 /// ```
-
 /// Alert severity levels
 pub const Severity = enum {
     info,
@@ -242,9 +241,9 @@ pub const AlertManager = struct {
     pub fn init(allocator: std.mem.Allocator) AlertManager {
         return .{
             .allocator = allocator,
-            .channels = std.ArrayList(AlertChannel).init(allocator),
-            .rules = std.ArrayList(AlertRule).init(allocator),
-            .history = std.ArrayList(AlertHistoryEntry).init(allocator),
+            .channels = .{ .items = &.{}, .capacity = 0 },
+            .rules = .{ .items = &.{}, .capacity = 0 },
+            .history = .{ .items = &.{}, .capacity = 0 },
             .max_history = 1000,
             .mutex = .{},
             .stats = AlertStats{},
@@ -254,52 +253,52 @@ pub const AlertManager = struct {
     }
 
     pub fn deinit(self: *AlertManager) void {
-        self.channels.deinit();
-        self.rules.deinit();
-        self.history.deinit();
+        self.channels.deinit(self.allocator);
+        self.rules.deinit(self.allocator);
+        self.history.deinit(self.allocator);
     }
 
     // ===== Channel Management =====
 
     /// Add a Slack channel
     pub fn addSlackChannel(self: *AlertManager, config: SlackConfig) !void {
-        try self.channels.append(.{ .slack = config });
+        try self.channels.append(self.allocator, .{ .slack = config });
         logger.info("Added Slack alert channel", .{});
     }
 
     /// Add a Discord channel
     pub fn addDiscordChannel(self: *AlertManager, config: SlackConfig) !void {
-        try self.channels.append(.{ .discord = config });
+        try self.channels.append(self.allocator, .{ .discord = config });
         logger.info("Added Discord alert channel", .{});
     }
 
     /// Add PagerDuty integration
     pub fn addPagerDuty(self: *AlertManager, config: PagerDutyConfig) !void {
-        try self.channels.append(.{ .pagerduty = config });
+        try self.channels.append(self.allocator, .{ .pagerduty = config });
         logger.info("Added PagerDuty alert channel", .{});
     }
 
     /// Add OpsGenie integration
     pub fn addOpsGenie(self: *AlertManager, config: OpsGenieConfig) !void {
-        try self.channels.append(.{ .opsgenie = config });
+        try self.channels.append(self.allocator, .{ .opsgenie = config });
         logger.info("Added OpsGenie alert channel", .{});
     }
 
     /// Add email notifications
     pub fn addEmailChannel(self: *AlertManager, config: EmailConfig) !void {
-        try self.channels.append(.{ .email = config });
+        try self.channels.append(self.allocator, .{ .email = config });
         logger.info("Added Email alert channel", .{});
     }
 
     /// Add generic webhook
     pub fn addWebhook(self: *AlertManager, config: WebhookConfig) !void {
-        try self.channels.append(.{ .webhook = config });
+        try self.channels.append(self.allocator, .{ .webhook = config });
         logger.info("Added Webhook alert channel", .{});
     }
 
     /// Add Prometheus Alertmanager
     pub fn addAlertmanager(self: *AlertManager, config: AlertmanagerConfig) !void {
-        try self.channels.append(.{ .alertmanager = config });
+        try self.channels.append(self.allocator, .{ .alertmanager = config });
         logger.info("Added Alertmanager channel", .{});
     }
 
@@ -307,7 +306,7 @@ pub const AlertManager = struct {
 
     /// Add an alert rule
     pub fn addRule(self: *AlertManager, rule: AlertRule) !void {
-        try self.rules.append(rule);
+        try self.rules.append(self.allocator, rule);
         logger.info("Added alert rule: {s}", .{rule.name});
     }
 
@@ -567,7 +566,7 @@ pub const AlertManager = struct {
             _ = self.history.orderedRemove(0);
         }
 
-        try self.history.append(.{
+        try self.history.append(self.allocator, .{
             .timestamp = alert.timestamp,
             .severity = alert.severity,
             .category = alert.category,
@@ -613,10 +612,10 @@ pub const AlertStats = struct {
 
 /// Create default alert rules for SMTP monitoring
 pub fn createDefaultRules(allocator: std.mem.Allocator) !std.ArrayList(AlertRule) {
-    var rules = std.ArrayList(AlertRule).init(allocator);
+    var rules: std.ArrayList(AlertRule) = .{ .items = &.{}, .capacity = 0 };
 
     // High bounce rate
-    try rules.append(.{
+    try rules.append(allocator, .{
         .name = "High Bounce Rate",
         .description = "Bounce rate exceeds 5%",
         .condition = .{ .threshold = .{
@@ -630,7 +629,7 @@ pub fn createDefaultRules(allocator: std.mem.Allocator) !std.ArrayList(AlertRule
     });
 
     // High spam rate
-    try rules.append(.{
+    try rules.append(allocator, .{
         .name = "High Spam Rate",
         .description = "Spam rate exceeds 10%",
         .condition = .{ .threshold = .{
@@ -644,7 +643,7 @@ pub fn createDefaultRules(allocator: std.mem.Allocator) !std.ArrayList(AlertRule
     });
 
     // Low auth success rate
-    try rules.append(.{
+    try rules.append(allocator, .{
         .name = "Authentication Issues",
         .description = "Auth success rate below 90%",
         .condition = .{ .threshold = .{
@@ -658,7 +657,7 @@ pub fn createDefaultRules(allocator: std.mem.Allocator) !std.ArrayList(AlertRule
     });
 
     // Queue backup
-    try rules.append(.{
+    try rules.append(allocator, .{
         .name = "Queue Backup",
         .description = "Queue size exceeds 1000 messages",
         .condition = .{ .threshold = .{

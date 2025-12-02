@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const io_compat = @import("io_compat.zig");
 
 /// Standardized Memory Management for SMTP Server
 /// Enforces consistent RAII patterns with defer for safe resource cleanup
@@ -485,7 +486,7 @@ pub const utils = struct {
 
     /// Format into buffer, return slice
     pub fn formatBuf(buf: []u8, comptime fmt: []const u8, args: anytype) ![]u8 {
-        var fbs = std.io.fixedBufferStream(buf);
+        var fbs = io_compat.fixedBufferStream(buf);
         try fbs.writer().print(fmt, args);
         return fbs.getWritten();
     }

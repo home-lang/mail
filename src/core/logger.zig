@@ -1,5 +1,6 @@
 const std = @import("std");
 const time_compat = @import("time_compat.zig");
+const io_compat = @import("io_compat.zig");
 
 pub const LogLevel = enum {
     debug,
@@ -137,8 +138,8 @@ pub const Logger = struct {
         message: []const u8,
         fields: ?std.StringHashMap([]const u8),
     ) ![]const u8 {
-        var stream = std.io.fixedBufferStream(buf);
-        var writer = stream.writer();
+        var fbs = io_compat.fixedBufferStream(buf);
+        var writer = fbs.writer();
 
         try writer.writeAll("{\"timestamp\":");
         try writer.print("{d}", .{timestamp});
@@ -165,7 +166,7 @@ pub const Logger = struct {
         }
 
         try writer.writeAll("}\n");
-        return stream.getWritten();
+        return fbs.getWritten();
     }
 
     /// Escape special characters for JSON
@@ -281,9 +282,9 @@ pub const Logger = struct {
             .json => self.formatJSON(&log_buf, timestamp, slog.level, slog.message, slog.fields) catch return,
             .text => blk: {
                 // Format as text with key=value pairs
-                var stream = std.io.fixedBufferStream(&log_buf);
-                var writer = stream.writer();
-                writer.print("[{d}] [{s}] {s}", .{
+                var text_fbs = io_compat.fixedBufferStream(&log_buf);
+                var text_writer = text_fbs.writer();
+                text_writer.print("[{d}] [{s}] {s}", .{
                     timestamp,
                     slog.level.toString(),
                     slog.message,
@@ -291,10 +292,10 @@ pub const Logger = struct {
 
                 var it = slog.fields.iterator();
                 while (it.next()) |entry| {
-                    writer.print(" {s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* }) catch return;
+                    text_writer.print(" {s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* }) catch return;
                 }
-                writer.writeAll("\n") catch return;
-                break :blk stream.getWritten();
+                text_writer.writeAll("\n") catch return;
+                break :blk text_fbs.getWritten();
             },
         };
 

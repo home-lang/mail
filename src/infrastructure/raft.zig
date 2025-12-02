@@ -19,12 +19,11 @@ const logger = @import("../core/logger.zig");
 /// - Log Matching: If logs contain entry with same index/term, all preceding entries match
 /// - Leader Completeness: Committed entries appear in all future leaders' logs
 /// - State Machine Safety: All servers apply same log entries in same order
-
 /// Raft node state
-pub const RaftState = enum {
-    follower,
-    candidate,
-    leader,
+pub const RaftState = enum(u8) {
+    follower = 0,
+    candidate = 1,
+    leader = 2,
 
     pub fn toString(self: RaftState) []const u8 {
         return switch (self) {
@@ -186,7 +185,7 @@ pub const RaftNode = struct {
         // Initialize random for election timeout
         var seed: u64 = undefined;
         std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            seed = @intCast(std.time.nanoTimestamp());
+            seed = @intCast(time_compat.timestamp());
         };
         var prng = std.Random.DefaultPrng.init(seed);
 
@@ -195,7 +194,7 @@ pub const RaftNode = struct {
             .config = config,
             .current_term = 0,
             .voted_for = null,
-            .log = std.ArrayList(LogEntry).init(allocator),
+            .log = .{ .items = &.{}, .capacity = 0 },
             .commit_index = 0,
             .last_applied = 0,
             .state = std.atomic.Value(RaftState).init(.follower),
@@ -223,7 +222,7 @@ pub const RaftNode = struct {
         for (self.log.items) |*entry| {
             entry.deinit(self.allocator);
         }
-        self.log.deinit();
+        self.log.deinit(self.allocator);
 
         // Free voted_for
         if (self.voted_for) |vf| {
@@ -519,7 +518,7 @@ pub const RaftNode = struct {
                 },
             }
 
-            std.time.sleep(10 * std.time.ns_per_ms); // Tick every 10ms
+            time_compat.sleepMs(10); // Tick every 10ms
         }
     }
 
@@ -527,11 +526,11 @@ pub const RaftNode = struct {
         const range = self.config.election_timeout_max_ms - self.config.election_timeout_min_ms;
         self.election_timeout_ms = self.config.election_timeout_min_ms +
             self.random.uintLessThan(u64, range);
-        self.last_heartbeat = std.time.milliTimestamp();
+        self.last_heartbeat = time_compat.milliTimestamp();
     }
 
     fn electionTimedOut(self: *RaftNode) bool {
-        const elapsed = std.time.milliTimestamp() - self.last_heartbeat;
+        const elapsed = time_compat.milliTimestamp() - self.last_heartbeat;
         return elapsed > @as(i64, @intCast(self.election_timeout_ms));
     }
 
@@ -609,7 +608,7 @@ pub const RaftNode = struct {
             .command = self.allocator.dupe(u8, "") catch &[_]u8{},
             .entry_type = .no_op,
         };
-        self.log.append(noop) catch {};
+        self.log.append(self.allocator, noop) catch {};
 
         logger.info("Became LEADER for term {d}", .{self.current_term});
 
@@ -642,13 +641,13 @@ pub const RaftNode = struct {
             0;
 
         // Collect entries to send
-        var entries_to_send = std.ArrayList(LogEntry).init(self.allocator);
-        defer entries_to_send.deinit();
+        var entries_to_send: std.ArrayList(LogEntry) = .{ .items = &.{}, .capacity = 0 };
+        defer entries_to_send.deinit(self.allocator);
 
         var i = peer.next_index;
         while (i <= self.getLastLogIndex() and entries_to_send.items.len < self.config.max_entries_per_append) : (i += 1) {
             if (self.getLogEntry(i)) |entry| {
-                entries_to_send.append(entry.*) catch break;
+                entries_to_send.append(self.allocator, entry.*) catch break;
             }
         }
 

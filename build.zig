@@ -111,8 +111,7 @@ pub fn build(b: *std.Build) void {
         .name = "user-cli",
         .root_module = user_cli_module,
     });
-    user_cli.linkLibC();
-    user_cli.linkSystemLibrary("sqlite3");
+    linkSqlite3(user_cli, target);
     b.installArtifact(user_cli);
 
     // GDPR compliance CLI tool
@@ -126,8 +125,7 @@ pub fn build(b: *std.Build) void {
         .name = "gdpr-cli",
         .root_module = gdpr_cli_module,
     });
-    gdpr_cli.linkLibC();
-    gdpr_cli.linkSystemLibrary("sqlite3");
+    linkSqlite3(gdpr_cli, target);
     b.installArtifact(gdpr_cli);
 
     // Search CLI tool
@@ -141,8 +139,7 @@ pub fn build(b: *std.Build) void {
         .name = "search-cli",
         .root_module = search_cli_module,
     });
-    search_cli.linkLibC();
-    search_cli.linkSystemLibrary("sqlite3");
+    linkSqlite3(search_cli, target);
     b.installArtifact(search_cli);
 
     // Database Migration CLI tool
@@ -156,8 +153,7 @@ pub fn build(b: *std.Build) void {
         .name = "migrate-cli",
         .root_module = migrate_cli_module,
     });
-    migrate_cli.linkLibC();
-    migrate_cli.linkSystemLibrary("sqlite3");
+    linkSqlite3(migrate_cli, target);
     b.installArtifact(migrate_cli);
 
     // Benchmark CLI tool
@@ -377,29 +373,69 @@ fn buildForTarget(
     b.getInstallStep().dependOn(&install.step);
 }
 
+/// Link sqlite3 - uses bundled source for cross-compilation, system library for native
+fn linkSqlite3(exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    const target_query = target.query;
+    const is_cross_compiling = target_query.os_tag != null or target_query.cpu_arch != null;
+
+    exe.linkLibC();
+
+    if (is_cross_compiling) {
+        // Cross-compilation: use bundled sqlite3 source
+        exe.addCSourceFile(.{
+            .file = .{ .cwd_relative = "deps/sqlite3.c" },
+            .flags = &.{
+                "-DSQLITE_THREADSAFE=1",
+                "-DSQLITE_ENABLE_FTS5",
+                "-DSQLITE_ENABLE_JSON1",
+                "-DSQLITE_ENABLE_RTREE",
+                "-DSQLITE_DQS=0",
+            },
+        });
+        exe.addIncludePath(.{ .cwd_relative = "deps" });
+    } else {
+        // Native build: use system sqlite3
+        exe.linkSystemLibrary("sqlite3");
+    }
+}
+
 /// Link platform-specific libraries
 fn linkPlatformLibraries(exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     const target_query = target.query;
     const os_tag = target_query.os_tag orelse .linux;
+    const is_cross_compiling = target_query.os_tag != null or target_query.cpu_arch != null;
 
     // Link libc on all platforms
     exe.linkLibC();
 
-    switch (os_tag) {
-        .linux, .freebsd, .openbsd, .macos => {
-            // Unix platforms: SQLite3
-            exe.linkSystemLibrary("sqlite3");
-        },
-        .windows => {
-            // Windows: SQLite3 (must be available in system)
-            exe.linkSystemLibrary("sqlite3");
-            // Windows-specific libraries
-            exe.linkSystemLibrary("ws2_32"); // Winsock2
-            exe.linkSystemLibrary("advapi32"); // Service management
-        },
-        else => {
-            // Other platforms: best effort
-            exe.linkSystemLibrary("sqlite3");
-        },
+    // For cross-compilation, use bundled sqlite3 source
+    if (is_cross_compiling) {
+        // Add bundled sqlite3 source
+        exe.addCSourceFile(.{
+            .file = .{ .cwd_relative = "deps/sqlite3.c" },
+            .flags = &.{
+                "-DSQLITE_THREADSAFE=1",
+                "-DSQLITE_ENABLE_FTS5",
+                "-DSQLITE_ENABLE_JSON1",
+                "-DSQLITE_ENABLE_RTREE",
+                "-DSQLITE_DQS=0",
+            },
+        });
+        exe.addIncludePath(.{ .cwd_relative = "deps" });
+    } else {
+        // Native build: use system sqlite3
+        switch (os_tag) {
+            .linux, .freebsd, .openbsd, .macos => {
+                exe.linkSystemLibrary("sqlite3");
+            },
+            .windows => {
+                exe.linkSystemLibrary("sqlite3");
+                exe.linkSystemLibrary("ws2_32");
+                exe.linkSystemLibrary("advapi32");
+            },
+            else => {
+                exe.linkSystemLibrary("sqlite3");
+            },
+        }
     }
 }

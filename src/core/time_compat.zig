@@ -54,6 +54,18 @@ pub fn readFileToEnd(allocator: std.mem.Allocator, file: std.fs.File, max_size: 
     return data;
 }
 
+/// Sleep for the specified number of nanoseconds
+pub fn sleep(nanoseconds: u64) void {
+    const secs = nanoseconds / std.time.ns_per_s;
+    const nsecs = nanoseconds % std.time.ns_per_s;
+    std.posix.nanosleep(secs, nsecs);
+}
+
+/// Sleep for the specified number of milliseconds
+pub fn sleepMs(milliseconds: u64) void {
+    sleep(milliseconds * std.time.ns_per_ms);
+}
+
 test "timestamp returns reasonable value" {
     const ts = timestamp();
     // Should be after year 2020 (timestamp > 1577836800)

@@ -1,6 +1,7 @@
 const std = @import("std");
+const posix = std.posix;
 const logger = @import("../core/logger.zig");
-const tls = @import("tls");
+const time_compat = @import("../core/time_compat.zig");
 
 pub const WebhookConfig = struct {
     url: ?[]const u8,
@@ -16,6 +17,7 @@ pub const WebhookPayload = struct {
     remote_addr: []const u8,
 };
 
+/// Send webhook notification using synchronous POSIX sockets
 pub fn sendWebhook(allocator: std.mem.Allocator, cfg: WebhookConfig, payload: WebhookPayload, log: *logger.Logger) !void {
     if (!cfg.enabled or cfg.url == null) {
         return;
@@ -24,25 +26,19 @@ pub fn sendWebhook(allocator: std.mem.Allocator, cfg: WebhookConfig, payload: We
     const url = cfg.url.?;
 
     // Build JSON payload
-    var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
+    const recipients_json = try formatRecipients(allocator, payload.recipients);
+    defer allocator.free(recipients_json);
 
-    const writer = json_buf.writer(allocator);
-
-    try writer.writeAll("{");
-    try writer.print("\"from\":\"{s}\",", .{payload.from});
-    try writer.writeAll("\"recipients\":[");
-    for (payload.recipients, 0..) |rcpt, i| {
-        if (i > 0) try writer.writeAll(",");
-        try writer.print("\"{s}\"", .{rcpt});
-    }
-    try writer.writeAll("],");
-    try writer.print("\"size\":{d},", .{payload.size});
-    try writer.print("\"timestamp\":{d},", .{payload.timestamp});
-    try writer.print("\"remote_addr\":\"{s}\"", .{payload.remote_addr});
-    try writer.writeAll("}");
-
-    log.debug("Webhook payload: {s}", .{json_buf.items});
+    const json_body = try std.fmt.allocPrint(allocator,
+        \\{{"from":"{s}","recipients":[{s}],"size":{d},"timestamp":{d},"remote_addr":"{s}"}}
+    , .{
+        payload.from,
+        recipients_json,
+        payload.size,
+        payload.timestamp,
+        payload.remote_addr,
+    });
+    defer allocator.free(json_body);
 
     // Parse URL
     const uri = std.Uri.parse(url) catch |err| {
@@ -50,135 +46,122 @@ pub fn sendWebhook(allocator: std.mem.Allocator, cfg: WebhookConfig, payload: We
         return error.InvalidWebhookUrl;
     };
 
-    // Determine if HTTPS
-    const use_tls_flag = std.mem.eql(u8, uri.scheme, "https");
-
-    // Get host and port
-    const host = uri.host.?.percent_encoded;
-    const port: u16 = uri.port orelse if (use_tls_flag) 443 else 80;
-
-    // Connect to webhook server
-    var address: std.net.Address = undefined;
-
-    // Try direct IP parsing first
-    address = std.net.Address.parseIp(host, port) catch blk: {
-        // Try DNS resolution
-        const address_list = try std.net.getAddressList(allocator, host, port);
-        defer address_list.deinit();
-
-        if (address_list.addrs.len == 0) {
-            log.err("Could not resolve webhook host: {s}", .{host});
-            return error.WebhookHostNotFound;
-        }
-
-        break :blk address_list.addrs[0];
+    const host = uri.host orelse {
+        log.err("No host in webhook URL: {s}", .{url});
+        return error.InvalidWebhookUrl;
     };
 
-    const stream = std.net.tcpConnectToAddress(address) catch |err| {
-        log.err("Failed to connect to webhook: {s}:{d} - {}", .{ host, port, err });
-        return error.WebhookConnectionFailed;
-    };
-    defer stream.close();
-
-    // Build HTTP request
-    var request_buf: [4096]u8 = undefined;
+    // For percent-encoded host
+    const host_str = host.percent_encoded;
+    const port: u16 = uri.port orelse 80;
     const path = if (uri.path.percent_encoded.len > 0) uri.path.percent_encoded else "/";
 
-    const request = try std.fmt.bufPrint(&request_buf,
-        "POST {s} HTTP/1.1\r\n" ++
+    // HTTPS not supported yet - use HTTP only
+    if (std.mem.eql(u8, uri.scheme, "https")) {
+        log.warn("HTTPS webhooks not yet supported, skipping: {s}", .{url});
+        return;
+    }
+
+    // Parse IP address
+    const ip = parseIpv4(host_str) orelse {
+        log.warn("Could not parse webhook host IP: {s}", .{host_str});
+        return;
+    };
+
+    // Create socket
+    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
+        log.err("Failed to create socket: {}", .{err});
+        return;
+    };
+    defer posix.close(fd);
+
+    // Connect
+    const sockaddr = posix.sockaddr.in{
+        .family = posix.AF.INET,
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = std.mem.bytesToValue(u32, &ip),
+    };
+
+    posix.connect(fd, @ptrCast(&sockaddr), @sizeOf(posix.sockaddr.in)) catch |err| {
+        log.err("Failed to connect to webhook: {s}:{d} - {}", .{ host_str, port, err });
+        return;
+    };
+
+    // Build HTTP request
+    const request = try std.fmt.allocPrint(allocator, "POST {s} HTTP/1.1\r\n" ++
         "Host: {s}\r\n" ++
         "Content-Type: application/json\r\n" ++
         "Content-Length: {d}\r\n" ++
         "User-Agent: SMTP-Server-Zig/1.0\r\n" ++
         "Connection: close\r\n" ++
         "\r\n" ++
-        "{s}",
-        .{ path, host, json_buf.items.len, json_buf.items },
-    );
+        "{s}", .{ path, host_str, json_body.len, json_body });
+    defer allocator.free(request);
 
-    if (use_tls_flag) {
-        // HTTPS request
-        try sendHttpsRequest(allocator, stream, request, host, url, log);
-    } else {
-        // HTTP request
-        try sendHttpRequest(stream, request, url, log);
-    }
-}
-
-fn sendHttpRequest(stream: std.net.Stream, request: []const u8, url: []const u8, log: *logger.Logger) !void {
     // Send request
-    _ = stream.write(request) catch |err| {
+    _ = posix.write(fd, request) catch |err| {
         log.err("Failed to send webhook request: {}", .{err});
-        return error.WebhookSendFailed;
-    };
-
-    // Read response (basic validation)
-    var response_buf: [1024]u8 = undefined;
-    const bytes_read = stream.read(&response_buf) catch |err| {
-        log.warn("Failed to read webhook response: {}", .{err});
-        return; // Don't fail on response read errors
-    };
-
-    if (bytes_read > 0) {
-        const response = response_buf[0..bytes_read];
-        if (std.mem.indexOf(u8, response, "HTTP/1") != null) {
-            if (std.mem.indexOf(u8, response, "200") != null or
-               std.mem.indexOf(u8, response, "201") != null or
-               std.mem.indexOf(u8, response, "202") != null) {
-                log.info("Webhook delivered successfully to {s}", .{url});
-            } else {
-                log.warn("Webhook returned non-2xx status: {s}", .{response[0..@min(100, response.len)]});
-            }
-        }
-    }
-}
-
-fn sendHttpsRequest(
-    allocator: std.mem.Allocator,
-    stream: std.net.Stream,
-    request: []const u8,
-    hostname: []const u8,
-    url: []const u8,
-    log: *logger.Logger,
-) !void {
-    _ = allocator; // TLS library will handle allocation internally
-
-    // Initialize TLS client connection from stream
-    // For webhook HTTPS, we skip certificate verification for simplicity
-    // In production, you may want to provide proper root CAs
-    var tls_conn = tls.clientFromStream(stream, .{
-        .host = hostname,
-        .root_ca = .{},
-        .insecure_skip_verify = true,
-    }) catch |err| {
-        log.err("Failed to initialize TLS client: {}", .{err});
-        return error.TlsInitFailed;
-    };
-    defer tls_conn.close() catch {};
-
-    // Send HTTPS request
-    tls_conn.writeAll(request) catch |err| {
-        log.err("Failed to send HTTPS webhook request: {}", .{err});
-        return error.WebhookSendFailed;
+        return;
     };
 
     // Read response
     var response_buf: [1024]u8 = undefined;
-    const bytes_read = tls_conn.read(&response_buf) catch |err| {
-        log.warn("Failed to read HTTPS webhook response: {}", .{err});
-        return; // Don't fail on response read errors
+    const bytes_read = posix.read(fd, &response_buf) catch |err| {
+        log.warn("Failed to read webhook response: {}", .{err});
+        return;
     };
 
     if (bytes_read > 0) {
         const response = response_buf[0..bytes_read];
         if (std.mem.indexOf(u8, response, "HTTP/1") != null) {
-            if (std.mem.indexOf(u8, response, "200") != null or
-               std.mem.indexOf(u8, response, "201") != null or
-               std.mem.indexOf(u8, response, "202") != null) {
-                log.info("HTTPS webhook delivered successfully to {s}", .{url});
+            if (std.mem.indexOf(u8, response, " 2") != null) {
+                log.info("Webhook delivered successfully to {s}", .{url});
             } else {
-                log.warn("HTTPS webhook returned non-2xx status: {s}", .{response[0..@min(100, response.len)]});
+                log.warn("Webhook returned non-2xx status: {s}", .{response[0..@min(50, response.len)]});
             }
         }
     }
+}
+
+fn formatRecipients(allocator: std.mem.Allocator, recipients: []const []const u8) ![]u8 {
+    if (recipients.len == 0) return try allocator.dupe(u8, "");
+
+    var result = std.ArrayList(u8){};
+    errdefer result.deinit(allocator);
+
+    for (recipients, 0..) |rcpt, i| {
+        if (i > 0) try result.appendSlice(allocator, ",");
+        try result.appendSlice(allocator, "\"");
+        try result.appendSlice(allocator, rcpt);
+        try result.appendSlice(allocator, "\"");
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
+fn parseIpv4(s: []const u8) ?[4]u8 {
+    var result: [4]u8 = undefined;
+    var idx: usize = 0;
+    var octet: u16 = 0;
+    var digits: u8 = 0;
+
+    for (s) |c| {
+        if (c == '.') {
+            if (digits == 0 or idx >= 3) return null;
+            result[idx] = @intCast(octet);
+            idx += 1;
+            octet = 0;
+            digits = 0;
+        } else if (c >= '0' and c <= '9') {
+            octet = octet * 10 + (c - '0');
+            if (octet > 255) return null;
+            digits += 1;
+            if (digits > 3) return null;
+        } else {
+            return null;
+        }
+    }
+    if (digits == 0 or idx != 3) return null;
+    result[3] = @intCast(octet);
+    return result;
 }

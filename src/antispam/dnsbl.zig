@@ -23,29 +23,44 @@ pub const DnsblChecker = struct {
     /// Check if an IP address is listed in any DNSBL
     /// Returns true if the IP is blacklisted
     pub fn isBlacklisted(self: *DnsblChecker, ip_addr: []const u8) !bool {
-        // Parse IP address
-        const addr = std.net.Address.parseIp(ip_addr, 0) catch {
-            // If we can't parse the IP, don't block it
-            return false;
-        };
+        // Parse IP address into octets
+        const octets = parseIpv4(ip_addr) orelse return false;
 
-        // Only support IPv4 for DNSBL lookups
-        if (addr.any.family != std.posix.AF.INET) {
-            return false;
-        }
-
-        const ipv4 = addr.in.sa.addr;
-        const octets = @as([4]u8, @bitCast(ipv4));
-
-        // For each blacklist, perform a DNS lookup
-        for (self.blacklists) |bl| {
-            const is_listed = try self.checkBlacklist(octets, bl);
-            if (is_listed) {
+        // Check each blacklist
+        for (self.blacklists) |blacklist| {
+            if (try self.checkBlacklist(octets, blacklist)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    fn parseIpv4(ip: []const u8) ?[4]u8 {
+        var result: [4]u8 = undefined;
+        var idx: usize = 0;
+        var octet: u16 = 0;
+        var digits: u8 = 0;
+
+        for (ip) |c| {
+            if (c == '.') {
+                if (digits == 0 or idx >= 3) return null;
+                result[idx] = @intCast(octet);
+                idx += 1;
+                octet = 0;
+                digits = 0;
+            } else if (c >= '0' and c <= '9') {
+                octet = octet * 10 + (c - '0');
+                if (octet > 255) return null;
+                digits += 1;
+                if (digits > 3) return null;
+            } else {
+                return null;
+            }
+        }
+        if (digits == 0 or idx != 3) return null;
+        result[3] = @intCast(octet);
+        return result;
     }
 
     /// Check a single blacklist for an IP

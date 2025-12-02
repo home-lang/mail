@@ -18,7 +18,6 @@ const sqlite = @cImport(@cInclude("sqlite3.h"));
 /// - Audit trail of all data operations
 /// - Machine-readable export format (JSON)
 /// - Secure deletion (unrecoverable)
-
 pub const GDPRError = error{
     DatabaseError,
     ExportFailed,
@@ -200,6 +199,72 @@ pub const DataExport = struct {
         try writer.writeAll("}");
 
         try writer.writeAll("}");
+    }
+
+    /// Export to JSON string (Zig 0.16 compatible)
+    pub fn toJSONString(self: *const DataExport, allocator: std.mem.Allocator) ![]u8 {
+        var result = std.ArrayList(u8){};
+        errdefer result.deinit(allocator);
+
+        // Build JSON manually using appendSlice
+        try result.appendSlice(allocator, "{");
+
+        // User info
+        const user_part = try std.fmt.allocPrint(allocator, "\"user\":\"{s}\",\"export_date\":{d},", .{ self.user, self.export_date });
+        defer allocator.free(user_part);
+        try result.appendSlice(allocator, user_part);
+
+        // Personal info
+        const last_login_str = if (self.data.personal_info.last_login) |ll|
+            try std.fmt.allocPrint(allocator, "{d}", .{ll})
+        else
+            try allocator.dupe(u8, "null");
+        defer allocator.free(last_login_str);
+
+        const personal_part = try std.fmt.allocPrint(allocator, "\"personal_info\":{{\"username\":\"{s}\",\"email\":\"{s}\",\"created_at\":{d},\"last_login\":{s},\"quota_mb\":{d},\"used_mb\":{d}}},", .{
+            self.data.personal_info.username,
+            self.data.personal_info.email,
+            self.data.personal_info.created_at,
+            last_login_str,
+            self.data.personal_info.quota_mb,
+            self.data.personal_info.used_mb,
+        });
+        defer allocator.free(personal_part);
+        try result.appendSlice(allocator, personal_part);
+
+        // Messages array
+        try result.appendSlice(allocator, "\"messages\":[");
+        for (self.data.messages, 0..) |msg, i| {
+            if (i > 0) try result.appendSlice(allocator, ",");
+            const msg_part = try std.fmt.allocPrint(allocator, "{{\"id\":\"{s}\",\"from\":\"{s}\",\"subject\":\"{s}\",\"date\":{d},\"size_bytes\":{d},\"folder\":\"{s}\",\"flags\":\"{s}\"}}", .{
+                msg.id, msg.from, msg.subject, msg.date, msg.size_bytes, msg.folder, msg.flags,
+            });
+            defer allocator.free(msg_part);
+            try result.appendSlice(allocator, msg_part);
+        }
+        try result.appendSlice(allocator, "],");
+
+        // Activity array
+        try result.appendSlice(allocator, "\"activity\":[");
+        for (self.data.activity, 0..) |act, i| {
+            if (i > 0) try result.appendSlice(allocator, ",");
+            const act_part = try std.fmt.allocPrint(allocator, "{{\"timestamp\":{d},\"action\":\"{s}\",\"ip_address\":\"{s}\",\"user_agent\":\"{s}\",\"success\":{}}}", .{
+                act.timestamp, act.action, act.ip_address, act.user_agent, act.success,
+            });
+            defer allocator.free(act_part);
+            try result.appendSlice(allocator, act_part);
+        }
+        try result.appendSlice(allocator, "],");
+
+        // Metadata
+        const meta_part = try std.fmt.allocPrint(allocator, "\"metadata\":{{\"total_messages\":{d},\"total_size_bytes\":{d}}}}}", .{
+            self.data.metadata.total_messages,
+            self.data.metadata.total_size_bytes,
+        });
+        defer allocator.free(meta_part);
+        try result.appendSlice(allocator, meta_part);
+
+        return try result.toOwnedSlice(allocator);
     }
 };
 

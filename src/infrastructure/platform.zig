@@ -18,7 +18,6 @@ const builtin = @import("builtin");
 /// - Process management
 /// - Network operations
 /// - File permissions
-
 pub const Platform = enum {
     linux,
     windows,
@@ -329,14 +328,14 @@ pub const Service = struct {
 /// Signal handling (Unix vs Windows)
 pub const Signal = struct {
     /// Set up signal handler
-    pub fn setupHandler(signal: std.posix.system.SIG, handler: *const fn (i32) callconv(.C) void) !void {
+    pub fn setupHandler(signal: std.posix.SIG, handler: *const fn (std.posix.SIG) callconv(.c) void) !void {
         if (Platform.current().isUnix()) {
             const act = std.posix.Sigaction{
                 .handler = .{ .handler = handler },
-                .mask = std.posix.empty_sigset,
+                .mask = std.posix.sigemptyset(),
                 .flags = 0,
             };
-            try std.posix.sigaction(signal, &act, null);
+            std.posix.sigaction(signal, &act, null);
         } else {
             // Windows: Use SetConsoleCtrlHandler
             // Note: Different mechanism, would need Windows-specific implementation

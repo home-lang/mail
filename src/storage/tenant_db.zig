@@ -1,7 +1,20 @@
 const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
-const sqlite = @import("sqlite");
+// Note: sqlite module not available in Zig 0.16 - using stub
+// const sqlite = @import("sqlite");
 const multitenancy = @import("../features/multitenancy.zig");
+
+// Stub types for when sqlite is not available
+const SqliteDb = struct {
+    pub fn init(_: anytype) !SqliteDb {
+        return .{};
+    }
+    pub fn deinit(_: *SqliteDb) void {}
+    pub fn exec(_: *SqliteDb, _: []const u8) !void {}
+};
+const sqlite = struct {
+    pub const Db = SqliteDb;
+};
 
 /// Database operations for multi-tenancy
 pub const TenantDB = struct {

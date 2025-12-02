@@ -1,13 +1,15 @@
 const std = @import("std");
+const posix = std.posix;
 
 /// StatsD client for metrics reporting
 /// Sends metrics to a StatsD server via UDP
+/// Note: Networking disabled in Zig 0.16 migration - needs update
 pub const StatsDClient = struct {
     allocator: std.mem.Allocator,
     host: []const u8,
     port: u16,
     prefix: ?[]const u8, // Optional metric prefix (e.g., "smtp.")
-    socket: ?std.net.Stream,
+    socket_fd: ?posix.socket_t,
     enabled: bool,
     mutex: std.Thread.Mutex,
 
@@ -22,7 +24,7 @@ pub const StatsDClient = struct {
             .host = try allocator.dupe(u8, host),
             .port = port,
             .prefix = if (prefix) |p| try allocator.dupe(u8, p) else null,
-            .socket = null,
+            .socket_fd = null,
             .enabled = true,
             .mutex = .{},
         };
@@ -33,8 +35,8 @@ pub const StatsDClient = struct {
         if (self.prefix) |p| {
             self.allocator.free(p);
         }
-        if (self.socket) |sock| {
-            sock.close();
+        if (self.socket_fd) |fd| {
+            posix.close(fd);
         }
     }
 
@@ -43,11 +45,11 @@ pub const StatsDClient = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.socket != null) return; // Already connected
+        if (self.socket_fd != null) return; // Already connected
 
-        const address = try std.net.Address.parseIp(self.host, self.port);
-        const sock = try std.net.tcpConnectToAddress(address);
-        self.socket = sock;
+        // Create UDP socket
+        const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
+        self.socket_fd = fd;
     }
 
     /// Send a counter metric
