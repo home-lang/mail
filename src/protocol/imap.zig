@@ -51,6 +51,7 @@ pub const ImapCapability = enum {
     quota,
     sort,
     thread,
+    special_use, // RFC 6154 - SPECIAL-USE for Gmail-style folders
 
     pub fn toString(self: ImapCapability) []const u8 {
         return switch (self) {
@@ -66,8 +67,92 @@ pub const ImapCapability = enum {
             .quota => "QUOTA",
             .sort => "SORT",
             .thread => "THREAD",
+            .special_use => "SPECIAL-USE",
         };
     }
+};
+
+/// Folder type for Gmail-style folders
+pub const FolderType = enum {
+    inbox,
+    sent,
+    drafts,
+    trash,
+    junk,
+    archive,
+    all_mail,
+    starred,
+    important,
+    social,
+    forums,
+    updates,
+    promotions,
+    regular,
+
+    /// Get the SPECIAL-USE attributes for this folder type
+    pub fn getAttributes(self: FolderType) []const u8 {
+        return switch (self) {
+            .inbox => "\\HasNoChildren",
+            .sent => "\\HasNoChildren \\Sent",
+            .drafts => "\\HasNoChildren \\Drafts",
+            .trash => "\\HasNoChildren \\Trash",
+            .junk => "\\HasNoChildren \\Junk",
+            .archive => "\\HasNoChildren \\Archive",
+            .all_mail => "\\HasNoChildren \\All",
+            .starred => "\\HasNoChildren \\Flagged",
+            .important => "\\HasNoChildren \\Important",
+            .social => "\\HasNoChildren",
+            .forums => "\\HasNoChildren",
+            .updates => "\\HasNoChildren",
+            .promotions => "\\HasNoChildren",
+            .regular => "\\HasNoChildren",
+        };
+    }
+
+    /// Get the display name for this folder type
+    pub fn getName(self: FolderType) []const u8 {
+        return switch (self) {
+            .inbox => "INBOX",
+            .sent => "Sent",
+            .drafts => "Drafts",
+            .trash => "Trash",
+            .junk => "Junk",
+            .archive => "Archive",
+            .all_mail => "All Mail",
+            .starred => "Starred",
+            .important => "Important",
+            .social => "Social",
+            .forums => "Forums",
+            .updates => "Updates",
+            .promotions => "Promotions",
+            .regular => "",
+        };
+    }
+
+    /// Check if this is a virtual folder (computed from flags, not stored separately)
+    pub fn isVirtual(self: FolderType) bool {
+        return switch (self) {
+            .starred, .important, .all_mail => true,
+            else => false,
+        };
+    }
+};
+
+/// Gmail-style folders in the order they should be listed
+pub const GmailFolders = [_]FolderType{
+    .inbox,
+    .starred,
+    .important,
+    .sent,
+    .drafts,
+    .all_mail,
+    .junk,
+    .trash,
+    .archive,
+    .social,
+    .forums,
+    .updates,
+    .promotions,
 };
 
 /// IMAP message flags
@@ -196,6 +281,7 @@ pub const ImapCommand = enum {
     subscribe,
     unsubscribe,
     list,
+    xlist, // Gmail extension
     lsub,
     status,
     append,
@@ -230,6 +316,7 @@ pub const ImapCommand = enum {
             .{ "SUBSCRIBE", .subscribe },
             .{ "UNSUBSCRIBE", .unsubscribe },
             .{ "LIST", .list },
+            .{ "XLIST", .xlist },
             .{ "LSUB", .lsub },
             .{ "STATUS", .status },
             .{ "APPEND", .append },
@@ -318,6 +405,7 @@ pub const ImapSession = struct {
             .idle,
             .namespace,
             .uidplus,
+            .special_use, // RFC 6154 - Gmail-style folders
         };
 
         var cap_str = std.ArrayList(u8){};
@@ -332,6 +420,95 @@ pub const ImapSession = struct {
 
         try self.sendUntagged(cap_str.items);
         try self.sendResponse(tag, "OK", "CAPABILITY completed");
+    }
+
+    /// Handle LIST command - returns Gmail-style folder listing
+    fn handleList(self: *ImapSession, tag: []const u8, reference: []const u8, pattern: []const u8) !void {
+        _ = reference; // Reference name (usually empty)
+
+        if (self.state == .not_authenticated) {
+            try self.sendResponse(tag, "NO", "Must authenticate first");
+            return;
+        }
+
+        // If pattern is empty, return hierarchy delimiter
+        if (pattern.len == 0 or std.mem.eql(u8, pattern, "\"\"")) {
+            try self.sendUntagged("LIST (\\Noselect) \"/\" \"\"");
+            try self.sendResponse(tag, "OK", "LIST completed");
+            return;
+        }
+
+        // Return all Gmail-style folders
+        for (GmailFolders) |folder_type| {
+            const attrs = folder_type.getAttributes();
+            const name = folder_type.getName();
+
+            var response = std.ArrayList(u8){};
+            defer response.deinit(self.allocator);
+
+            const writer = response.writer(self.allocator);
+            try writer.print("LIST ({s}) \"/\" \"{s}\"", .{ attrs, name });
+            try self.sendUntagged(response.items);
+        }
+
+        try self.sendResponse(tag, "OK", "LIST completed");
+    }
+
+    /// Handle STATUS command - returns folder status
+    fn handleStatus(self: *ImapSession, tag: []const u8, mailbox_name: []const u8, status_items: []const u8) !void {
+        if (self.state == .not_authenticated) {
+            try self.sendResponse(tag, "NO", "Must authenticate first");
+            return;
+        }
+
+        // Parse which status items are requested
+        const want_messages = std.mem.indexOf(u8, status_items, "MESSAGES") != null;
+        const want_recent = std.mem.indexOf(u8, status_items, "RECENT") != null;
+        const want_uidnext = std.mem.indexOf(u8, status_items, "UIDNEXT") != null;
+        const want_uidvalidity = std.mem.indexOf(u8, status_items, "UIDVALIDITY") != null;
+        const want_unseen = std.mem.indexOf(u8, status_items, "UNSEEN") != null;
+
+        // Build status response (would be populated from actual mailbox data)
+        var response = std.ArrayList(u8){};
+        defer response.deinit(self.allocator);
+
+        const writer = response.writer(self.allocator);
+        try writer.print("STATUS \"{s}\" (", .{mailbox_name});
+
+        var first = true;
+        if (want_messages) {
+            try writer.writeAll("MESSAGES 0");
+            first = false;
+        }
+        if (want_recent) {
+            if (!first) try writer.writeAll(" ");
+            try writer.writeAll("RECENT 0");
+            first = false;
+        }
+        if (want_uidnext) {
+            if (!first) try writer.writeAll(" ");
+            try writer.writeAll("UIDNEXT 1");
+            first = false;
+        }
+        if (want_uidvalidity) {
+            if (!first) try writer.writeAll(" ");
+            try writer.print("UIDVALIDITY {d}", .{@as(u32, @intCast(time_compat.timestamp()))});
+            first = false;
+        }
+        if (want_unseen) {
+            if (!first) try writer.writeAll(" ");
+            try writer.writeAll("UNSEEN 0");
+        }
+        try writer.writeAll(")");
+
+        try self.sendUntagged(response.items);
+        try self.sendResponse(tag, "OK", "STATUS completed");
+    }
+
+    /// Handle XLIST command (Gmail extension, same as LIST)
+    fn handleXList(self: *ImapSession, tag: []const u8, reference: []const u8, pattern: []const u8) !void {
+        // XLIST is a Gmail extension that's equivalent to LIST with SPECIAL-USE
+        try self.handleList(tag, reference, pattern);
     }
 
     /// Handle LOGIN command
@@ -443,6 +620,40 @@ pub const ImapSession = struct {
             .select => {
                 const mailbox = parts.next() orelse "INBOX";
                 try self.handleSelect(tag, mailbox);
+            },
+            .list, .xlist => {
+                // LIST/XLIST reference pattern
+                const reference = parts.next() orelse "";
+                const pattern = parts.next() orelse "*";
+                if (command == .xlist) {
+                    try self.handleXList(tag, reference, pattern);
+                } else {
+                    try self.handleList(tag, reference, pattern);
+                }
+            },
+            .lsub => {
+                // LSUB is same as LIST for subscribed folders (we treat all as subscribed)
+                const reference = parts.next() orelse "";
+                const pattern = parts.next() orelse "*";
+                try self.handleList(tag, reference, pattern);
+            },
+            .status => {
+                // STATUS mailbox (items)
+                const mailbox_name = parts.next() orelse "INBOX";
+                // Get rest of line as status items
+                var status_items_buf: [256]u8 = undefined;
+                var status_len: usize = 0;
+                while (parts.next()) |part| {
+                    if (status_len > 0) {
+                        status_items_buf[status_len] = ' ';
+                        status_len += 1;
+                    }
+                    const copy_len = @min(part.len, status_items_buf.len - status_len);
+                    @memcpy(status_items_buf[status_len..][0..copy_len], part[0..copy_len]);
+                    status_len += copy_len;
+                }
+                const status_items = status_items_buf[0..status_len];
+                try self.handleStatus(tag, mailbox_name, status_items);
             },
             .fetch => {
                 const sequence_set = parts.next() orelse "1:*";

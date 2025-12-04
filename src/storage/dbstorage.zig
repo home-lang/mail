@@ -1,6 +1,7 @@
 const std = @import("std");
 const time_compat = @import("../core/time_compat.zig");
 const database = @import("database.zig");
+const filter = @import("../message/filter.zig");
 
 /// Database storage backend for email messages
 /// Stores entire email messages in SQLite database
@@ -118,6 +119,106 @@ pub const DatabaseStorage = struct {
         return self.db.lastInsertRowId();
     }
 
+    /// Store a message with automatic Gmail-style categorization
+    /// Parses headers and categorizes into Social, Forums, Updates, Promotions, or INBOX
+    pub fn storeMessageWithCategory(
+        self: *DatabaseStorage,
+        email: []const u8,
+        message_id: []const u8,
+        sender: []const u8,
+        recipients: []const []const u8,
+        subject: ?[]const u8,
+        headers: []const u8,
+        body: []const u8,
+    ) !i64 {
+        // Parse headers into a hashmap for categorization
+        var headers_map = std.StringHashMap([]const u8).init(self.allocator);
+        defer headers_map.deinit();
+
+        // Track allocated keys so we can free them after categorization
+        var allocated_keys = std.ArrayList([]u8).init(self.allocator);
+        defer {
+            for (allocated_keys.items) |key_to_free| {
+                self.allocator.free(key_to_free);
+            }
+            allocated_keys.deinit(self.allocator);
+        }
+
+        // Parse header lines (simple parsing: "Header-Name: value")
+        var header_iter = std.mem.splitSequence(u8, headers, "\r\n");
+        while (header_iter.next()) |line| {
+            if (line.len == 0) continue;
+            // Find the colon separator
+            if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+                const key = std.mem.trim(u8, line[0..colon_pos], " \t");
+                const value = if (colon_pos + 1 < line.len)
+                    std.mem.trim(u8, line[colon_pos + 1 ..], " \t")
+                else
+                    "";
+                // Store lowercase key for case-insensitive matching
+                var lower_key = try self.allocator.alloc(u8, key.len);
+                for (key, 0..) |c, i| {
+                    lower_key[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
+                }
+                try headers_map.put(lower_key, value);
+                try allocated_keys.append(self.allocator, lower_key);
+            }
+        }
+
+        // Categorize the email
+        const category = filter.categorizeEmail(sender, &headers_map);
+
+        // Map category to folder name
+        const folder = switch (category) {
+            .social => "Social",
+            .forums => "Forums",
+            .updates => "Updates",
+            .promotions => "Promotions",
+            .primary => "INBOX",
+        };
+
+        // Store the message with the determined folder
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Join recipients into comma-separated string
+        var recipients_str = std.ArrayList(u8).init(self.allocator);
+        defer recipients_str.deinit(self.allocator);
+
+        for (recipients, 0..) |recipient, i| {
+            try recipients_str.appendSlice(self.allocator, recipient);
+            if (i < recipients.len - 1) {
+                try recipients_str.append(self.allocator, ',');
+            }
+        }
+
+        const size = body.len;
+        const received_at = time_compat.timestamp();
+
+        const query =
+            \\INSERT INTO messages (message_id, email, sender, recipients, subject, body, headers, size, received_at, folder)
+            \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ;
+
+        var stmt = try self.db.prepare(query);
+        defer stmt.finalize();
+
+        try stmt.bind(1, message_id);
+        try stmt.bind(2, email);
+        try stmt.bind(3, sender);
+        try stmt.bind(4, recipients_str.items);
+        try stmt.bind(5, subject orelse "");
+        try stmt.bind(6, body);
+        try stmt.bind(7, headers);
+        try stmt.bind(8, @as(i64, @intCast(size)));
+        try stmt.bind(9, received_at);
+        try stmt.bind(10, folder);
+
+        try stmt.step();
+
+        return self.db.lastInsertRowId();
+    }
+
     /// Retrieve a message by ID
     pub fn retrieveMessage(
         self: *DatabaseStorage,
@@ -140,7 +241,7 @@ pub const DatabaseStorage = struct {
         try stmt.bind(2, message_id);
 
         if (try stmt.step()) {
-            var message = StoredMessage{
+            const message = StoredMessage{
                 .id = try stmt.columnInt64(0),
                 .message_id = try self.allocator.dupe(u8, message_id),
                 .email = try self.allocator.dupe(u8, email),
@@ -592,4 +693,116 @@ test "message count" {
 
     const count = try storage.getMessageCount("user@example.com", null);
     try testing.expectEqual(@as(usize, 2), count);
+}
+
+test "store message with category - social" {
+    const testing = std.testing;
+
+    var db = try database.Database.init(testing.allocator, ":memory:");
+    defer db.deinit();
+    try db.initSchema();
+
+    var storage = try DatabaseStorage.init(testing.allocator, &db);
+    defer storage.deinit();
+
+    const recipients = [_][]const u8{"user@example.com"};
+    const headers = "From: notifications@facebook.com\r\nTo: user@example.com\r\nSubject: You have a new friend request\r\n";
+
+    const msg_id = try storage.storeMessageWithCategory(
+        "user@example.com",
+        "msg-social-1",
+        "notifications@facebook.com",
+        &recipients,
+        "You have a new friend request",
+        headers,
+        "Check out your friend request!",
+    );
+
+    try testing.expect(msg_id > 0);
+
+    // Verify it was categorized as Social
+    const message = try storage.retrieveMessage("user@example.com", "msg-social-1");
+    try testing.expect(message != null);
+
+    if (message) |msg| {
+        var msg_copy = msg;
+        defer msg_copy.deinit(testing.allocator);
+
+        try testing.expectEqualStrings("Social", msg.folder);
+    }
+}
+
+test "store message with category - updates (github)" {
+    const testing = std.testing;
+
+    var db = try database.Database.init(testing.allocator, ":memory:");
+    defer db.deinit();
+    try db.initSchema();
+
+    var storage = try DatabaseStorage.init(testing.allocator, &db);
+    defer storage.deinit();
+
+    const recipients = [_][]const u8{"user@example.com"};
+    // Even with "notifications@" in the address, github.com domain should put this in Updates
+    const headers = "From: notifications@github.com\r\nTo: user@example.com\r\nSubject: [repo] New PR comment\r\n";
+
+    const msg_id = try storage.storeMessageWithCategory(
+        "user@example.com",
+        "msg-updates-1",
+        "notifications@github.com",
+        &recipients,
+        "[repo] New PR comment",
+        headers,
+        "Someone commented on your PR.",
+    );
+
+    try testing.expect(msg_id > 0);
+
+    // Verify it was categorized as Updates, not Social
+    const message = try storage.retrieveMessage("user@example.com", "msg-updates-1");
+    try testing.expect(message != null);
+
+    if (message) |msg| {
+        var msg_copy = msg;
+        defer msg_copy.deinit(testing.allocator);
+
+        try testing.expectEqualStrings("Updates", msg.folder);
+    }
+}
+
+test "store message with category - primary (regular email)" {
+    const testing = std.testing;
+
+    var db = try database.Database.init(testing.allocator, ":memory:");
+    defer db.deinit();
+    try db.initSchema();
+
+    var storage = try DatabaseStorage.init(testing.allocator, &db);
+    defer storage.deinit();
+
+    const recipients = [_][]const u8{"user@example.com"};
+    const headers = "From: colleague@company.com\r\nTo: user@example.com\r\nSubject: Meeting tomorrow\r\n";
+
+    const msg_id = try storage.storeMessageWithCategory(
+        "user@example.com",
+        "msg-primary-1",
+        "colleague@company.com",
+        &recipients,
+        "Meeting tomorrow",
+        headers,
+        "Let's meet at 3pm.",
+    );
+
+    try testing.expect(msg_id > 0);
+
+    // Verify it was categorized as primary (INBOX)
+    const message = try storage.retrieveMessage("user@example.com", "msg-primary-1");
+    try testing.expect(message != null);
+
+    if (message) |msg| {
+        var msg_copy = msg;
+        defer msg_copy.deinit(testing.allocator);
+
+        try testing.expectEqualStrings("INBOX", msg.folder);
+    }
 }
