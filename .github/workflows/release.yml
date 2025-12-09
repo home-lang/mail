@@ -13,11 +13,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-linux
+            target: x86_64-linux-gnu
+            artifact: x86_64-linux
+          - os: ubuntu-latest
+            target: aarch64-linux-gnu
+            artifact: aarch64-linux
           - os: macos-latest
             target: x86_64-macos
+            artifact: x86_64-macos
           - os: macos-latest
             target: aarch64-macos
+            artifact: aarch64-macos
 
     steps:
     - name: Checkout code
@@ -31,13 +37,14 @@ jobs:
         version: master
 
     - name: Build release binary
-      run: zig build -Doptimize=ReleaseFast
+      run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
     - name: Package binary
       run: |
         mkdir -p release
-        cp zig-out/bin/* release/
-        tar -czf smtp-server-${{ matrix.target }}.tar.gz -C release .
+        # Find and copy the smtp-server binary (may be in target-specific dir)
+        find zig-out/bin -name 'smtp-server*' -type f -executable | head -1 | xargs -I {} cp {} release/smtp-server-${{ matrix.artifact }}
+        tar -czf smtp-server-${{ matrix.artifact }}.tar.gz -C release smtp-server-${{ matrix.artifact }}
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -117,6 +124,7 @@ jobs:
       with:
         files: |
           smtp-server-x86_64-linux/smtp-server-x86_64-linux.tar.gz
+          smtp-server-aarch64-linux/smtp-server-aarch64-linux.tar.gz
           smtp-server-x86_64-macos/smtp-server-x86_64-macos.tar.gz
           smtp-server-aarch64-macos/smtp-server-aarch64-macos.tar.gz
         body: |
