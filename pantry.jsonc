@@ -31,10 +31,10 @@
     "package:all": "mkdir -p dist && tar -czvf dist/smtp-server-x86_64-linux.tar.gz -C zig-out/bin/x86_64-linux smtp-server-x86_64-linux && tar -czvf dist/smtp-server-aarch64-linux.tar.gz -C zig-out/bin/aarch64-linux smtp-server-aarch64-linux && tar -czvf dist/smtp-server-x86_64-macos.tar.gz -C zig-out/bin/x86_64-macos smtp-server-x86_64-macos && tar -czvf dist/smtp-server-aarch64-macos.tar.gz -C zig-out/bin/aarch64-macos smtp-server-aarch64-macos",
 
     // Version bumping with zig-bump
-    "release": "~/Code/zig-bump/zig-out/bin/bump patch --all",
-    "release:patch": "~/Code/zig-bump/zig-out/bin/bump patch --all",
-    "release:minor": "~/Code/zig-bump/zig-out/bin/bump minor --all",
-    "release:major": "~/Code/zig-bump/zig-out/bin/bump major --all",
+    "release": "bump patch --all",
+    "release:patch": "bump patch --all",
+    "release:minor": "bump minor --all",
+    "release:major": "bump major --all",
 
     // Test the mail server
     "test": "zig build test",

@@ -32,3 +32,4 @@ config.local.zig
 # Test data
 test-emails/
 *.eml
+/pantry

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.2] - 2025-12-27
+
+### Features
+
+- feat: add all platform builds and pantry config
+
+### Chores
+
+- chore: add release script using zig-bump
+- chore: wip
+- chore: wip
+- chore: wip
+
 All notable changes to the SMTP Server project are documented in this file.
 
 ## [0.3.0] - 2025-10-23
