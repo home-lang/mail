@@ -284,9 +284,14 @@ pub fn main() !void {
             .ssl_port = 993,
             .enable_ssl = cfg.enable_tls,
             .max_connections = @intCast(cfg.max_connections),
+            .cert_path = cfg.tls_cert_path,
+            .key_path = cfg.tls_key_path,
         };
         imap_server = imap.ImapServer.init(allocator, imap_config, auth_ptr.?);
         log.info("IMAP server configured on port {d}", .{imap_port});
+        if (cfg.enable_tls and cfg.tls_cert_path != null) {
+            log.info("IMAPS server configured on port 993 (SSL/TLS)", .{});
+        }
     }
     defer if (imap_server) |*is| is.deinit();
 

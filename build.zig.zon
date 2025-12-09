@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .tls = .{
-            .url = "https://github.com/zig-utils/zig-tls/archive/64def5ee5b77c28d0ef1c8cc34f06a210c885c09.tar.gz",
-            .hash = "122036ee4232388773eedbb3ede05f72d2bb9540b9734549e7681aa736bfc223c24d",
+            // Local path to zig-tls with TLS 1.2 support for Apple Mail.app compatibility
+            .path = "../zig-tls",
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{

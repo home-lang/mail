@@ -21,8 +21,17 @@ pub const AuthBackend = struct {
     }
 
     pub fn verifyCredentials(self: *AuthBackend, username: []const u8, password: []const u8) !bool {
+        // Normalize username - if it's an email address (contains @), extract the local part
+        // This allows users to login with either "chris" or "chris@11ly.org"
+        const normalized_username = blk: {
+            if (std.mem.indexOf(u8, username, "@")) |at_pos| {
+                break :blk username[0..at_pos];
+            }
+            break :blk username;
+        };
+
         // Get user from database
-        var user = self.db.getUserByUsername(username) catch |err| {
+        var user = self.db.getUserByUsername(normalized_username) catch |err| {
             if (err == database.DatabaseError.NotFound) {
                 // User not found - return false but don't leak this information
                 return false;
