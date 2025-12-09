@@ -1,0 +1,44 @@
+{
+  "name": "mail",
+  "version": "0.0.1",
+  "description": "Modern SMTP/IMAP mail server written in Zig",
+  "dependencies": {
+    "ziglang.org": "0.16.0-dev",
+    "zig-bump": "~/Code/zig-bump"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mail-os/mail"
+  },
+  "build": {
+    "entry": "src/main.zig",
+    "output": "zig-out",
+    "targets": [
+      "x86_64-linux",
+      "aarch64-linux",
+      "x86_64-macos",
+      "aarch64-macos"
+    ]
+  },
+  "scripts": {
+    // Build for native platform
+    "build": "zig build -Doptimize=ReleaseFast",
+
+    // Build for all platforms
+    "build:all": "zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu && zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-gnu && zig build -Doptimize=ReleaseFast -Dtarget=x86_64-macos && zig build -Doptimize=ReleaseFast -Dtarget=aarch64-macos",
+
+    // Package all binaries into tarballs
+    "package:all": "mkdir -p dist && tar -czvf dist/smtp-server-x86_64-linux.tar.gz -C zig-out/bin/x86_64-linux smtp-server-x86_64-linux && tar -czvf dist/smtp-server-aarch64-linux.tar.gz -C zig-out/bin/aarch64-linux smtp-server-aarch64-linux && tar -czvf dist/smtp-server-x86_64-macos.tar.gz -C zig-out/bin/x86_64-macos smtp-server-x86_64-macos && tar -czvf dist/smtp-server-aarch64-macos.tar.gz -C zig-out/bin/aarch64-macos smtp-server-aarch64-macos",
+
+    // Version bumping with zig-bump
+    "release:patch": "bump patch --all",
+    "release:minor": "bump minor --all",
+    "release:major": "bump major --all",
+
+    // Test the mail server
+    "test": "zig build test",
+
+    // Run the mail server locally
+    "dev": "zig build run"
+  }
+}

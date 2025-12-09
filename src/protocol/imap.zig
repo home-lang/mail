@@ -1,5 +1,8 @@
 const std = @import("std");
+const posix = std.posix;
 const time_compat = @import("../core/time_compat.zig");
+const socket = @import("../core/socket_compat.zig");
+const io_compat = @import("../core/io_compat.zig");
 const auth = @import("../auth/auth.zig");
 const logger = @import("../core/logger.zig");
 
@@ -165,10 +168,9 @@ pub const MessageFlags = struct {
     recent: bool = false,
 
     pub fn toString(self: MessageFlags, allocator: std.mem.Allocator) ![]const u8 {
-        var flags = std.ArrayList(u8){};
-        defer flags.deinit(allocator);
-
-        const writer = flags.writer(allocator);
+        var buf: [256]u8 = undefined;
+        var fbs = io_compat.fixedBufferStream(&buf);
+        const writer = fbs.writer();
 
         try writer.writeAll("(");
         var has_flag = false;
@@ -203,7 +205,7 @@ pub const MessageFlags = struct {
         }
         try writer.writeAll(")");
 
-        return allocator.dupe(u8, flags.items);
+        return allocator.dupe(u8, fbs.getWritten());
     }
 };
 
@@ -338,7 +340,7 @@ pub const ImapCommand = enum {
 /// IMAP session
 pub const ImapSession = struct {
     allocator: std.mem.Allocator,
-    stream: std.net.Stream,
+    connection: socket.Connection,
     state: ImapState,
     username: ?[]const u8 = null,
     selected_mailbox: ?*Mailbox = null,
@@ -347,10 +349,10 @@ pub const ImapSession = struct {
     idle_mode: bool = false,
     auth_backend: *auth.AuthBackend,
 
-    pub fn init(allocator: std.mem.Allocator, stream: std.net.Stream, auth_backend: *auth.AuthBackend) ImapSession {
+    pub fn init(allocator: std.mem.Allocator, connection: socket.Connection, auth_backend: *auth.AuthBackend) ImapSession {
         return .{
             .allocator = allocator,
-            .stream = stream,
+            .connection = connection,
             .state = .not_authenticated,
             .command_buffer = std.ArrayList(u8){},
             .auth_backend = auth_backend,
@@ -370,29 +372,27 @@ pub const ImapSession = struct {
     /// Send greeting
     pub fn sendGreeting(self: *ImapSession) !void {
         const greeting = "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN] SMTP Server IMAP4rev1 ready\r\n";
-        try self.stream.writeAll(greeting);
+        _ = try self.connection.write(greeting);
     }
 
     /// Send response
     pub fn sendResponse(self: *ImapSession, tag: []const u8, status: []const u8, message: []const u8) !void {
-        var response = std.ArrayList(u8){};
-        defer response.deinit(self.allocator);
-
-        const writer = response.writer(self.allocator);
+        var buf: [4096]u8 = undefined;
+        var fbs = io_compat.fixedBufferStream(&buf);
+        const writer = fbs.writer();
         try writer.print("{s} {s} {s}\r\n", .{ tag, status, message });
 
-        try self.stream.writeAll(response.items);
+        _ = try self.connection.write(fbs.getWritten());
     }
 
     /// Send untagged response
     pub fn sendUntagged(self: *ImapSession, message: []const u8) !void {
-        var response = std.ArrayList(u8){};
-        defer response.deinit(self.allocator);
-
-        const writer = response.writer(self.allocator);
+        var buf: [4096]u8 = undefined;
+        var fbs = io_compat.fixedBufferStream(&buf);
+        const writer = fbs.writer();
         try writer.print("* {s}\r\n", .{message});
 
-        try self.stream.writeAll(response.items);
+        _ = try self.connection.write(fbs.getWritten());
     }
 
     /// Handle CAPABILITY command
@@ -408,17 +408,16 @@ pub const ImapSession = struct {
             .special_use, // RFC 6154 - Gmail-style folders
         };
 
-        var cap_str = std.ArrayList(u8){};
-        defer cap_str.deinit(self.allocator);
-
-        const writer = cap_str.writer(self.allocator);
+        var buf: [1024]u8 = undefined;
+        var fbs = io_compat.fixedBufferStream(&buf);
+        const writer = fbs.writer();
         try writer.writeAll("CAPABILITY");
 
         for (capabilities) |cap| {
             try writer.print(" {s}", .{cap.toString()});
         }
 
-        try self.sendUntagged(cap_str.items);
+        try self.sendUntagged(fbs.getWritten());
         try self.sendResponse(tag, "OK", "CAPABILITY completed");
     }
 
@@ -443,12 +442,11 @@ pub const ImapSession = struct {
             const attrs = folder_type.getAttributes();
             const name = folder_type.getName();
 
-            var response = std.ArrayList(u8){};
-            defer response.deinit(self.allocator);
-
-            const writer = response.writer(self.allocator);
+            var buf: [512]u8 = undefined;
+            var fbs = io_compat.fixedBufferStream(&buf);
+            const writer = fbs.writer();
             try writer.print("LIST ({s}) \"/\" \"{s}\"", .{ attrs, name });
-            try self.sendUntagged(response.items);
+            try self.sendUntagged(fbs.getWritten());
         }
 
         try self.sendResponse(tag, "OK", "LIST completed");
@@ -469,10 +467,9 @@ pub const ImapSession = struct {
         const want_unseen = std.mem.indexOf(u8, status_items, "UNSEEN") != null;
 
         // Build status response (would be populated from actual mailbox data)
-        var response = std.ArrayList(u8){};
-        defer response.deinit(self.allocator);
-
-        const writer = response.writer(self.allocator);
+        var buf: [1024]u8 = undefined;
+        var fbs = io_compat.fixedBufferStream(&buf);
+        const writer = fbs.writer();
         try writer.print("STATUS \"{s}\" (", .{mailbox_name});
 
         var first = true;
@@ -501,7 +498,7 @@ pub const ImapSession = struct {
         }
         try writer.writeAll(")");
 
-        try self.sendUntagged(response.items);
+        try self.sendUntagged(fbs.getWritten());
         try self.sendResponse(tag, "OK", "STATUS completed");
     }
 
@@ -671,7 +668,7 @@ pub const ImapSession = struct {
 pub const ImapServer = struct {
     allocator: std.mem.Allocator,
     config: ImapConfig,
-    listener: ?std.net.Server = null,
+    listener: ?socket.Server = null,
     sessions: std.ArrayList(*ImapSession),
     running: std.atomic.Value(bool),
     mutex: std.Thread.Mutex = .{},
@@ -698,8 +695,8 @@ pub const ImapServer = struct {
 
     /// Start the IMAP server
     pub fn start(self: *ImapServer) !void {
-        const address = std.net.Address.parseIp("0.0.0.0", self.config.port) catch unreachable;
-        self.listener = try address.listen(.{
+        const address = try socket.Address.parseIp("0.0.0.0", self.config.port);
+        self.listener = try socket.Server.listen(address, .{
             .reuse_address = true,
         });
 
@@ -714,9 +711,9 @@ pub const ImapServer = struct {
             };
 
             // Handle connection in a new thread (simplified)
-            self.handleConnection(connection.stream) catch |err| {
+            self.handleConnection(connection) catch |err| {
                 logger.err("IMAP connection error: {}", .{err});
-                connection.stream.close();
+                connection.close();
             };
         }
     }
@@ -725,19 +722,19 @@ pub const ImapServer = struct {
     pub fn stop(self: *ImapServer) void {
         self.running.store(false, .monotonic);
         if (self.listener) |*listener| {
-            listener.deinit();
+            listener.close();
             self.listener = null;
         }
     }
 
     /// Handle a client connection
-    fn handleConnection(self: *ImapServer, stream: std.net.Stream) !void {
+    fn handleConnection(self: *ImapServer, connection: socket.Connection) !void {
         var session = try self.allocator.create(ImapSession);
-        session.* = ImapSession.init(self.allocator, stream, self.auth_backend);
+        session.* = ImapSession.init(self.allocator, connection, self.auth_backend);
         defer {
             session.deinit();
             self.allocator.destroy(session);
-            stream.close();
+            connection.close();
         }
 
         // Send greeting
@@ -746,7 +743,7 @@ pub const ImapServer = struct {
         // Read commands
         var buffer: [4096]u8 = undefined;
         while (session.state != .logout) {
-            const bytes_read = stream.read(&buffer) catch break;
+            const bytes_read = connection.read(&buffer) catch break;
             if (bytes_read == 0) break;
 
             const line = std.mem.trim(u8, buffer[0..bytes_read], "\r\n");

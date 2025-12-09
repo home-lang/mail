@@ -6,6 +6,7 @@ const args_parser = @import("core/args.zig");
 const database = @import("storage/database.zig");
 const auth = @import("auth/auth.zig");
 const greylist_mod = @import("antispam/greylist.zig");
+const imap = @import("protocol/imap.zig");
 
 // Cluster and multi-tenancy support
 const cluster = @import("infrastructure/cluster.zig");
@@ -268,17 +269,67 @@ pub fn main() !void {
     var server = try smtp.Server.init(allocator, cfg, &log, db_ptr, auth_ptr, greylist_ptr);
     defer server.deinit();
 
+    // Initialize IMAP server if auth is enabled
+    var imap_server: ?imap.ImapServer = null;
+    var imap_thread: ?std.Thread = null;
+    const enable_imap = std.posix.getenv("IMAP_ENABLED") != null or cfg.enable_auth;
+    const imap_port: u16 = blk: {
+        const port_str = std.posix.getenv("IMAP_PORT") orelse "143";
+        break :blk std.fmt.parseInt(u16, port_str, 10) catch 143;
+    };
+
+    if (enable_imap and auth_ptr != null) {
+        const imap_config = imap.ImapConfig{
+            .port = imap_port,
+            .ssl_port = 993,
+            .enable_ssl = cfg.enable_tls,
+            .max_connections = @intCast(cfg.max_connections),
+        };
+        imap_server = imap.ImapServer.init(allocator, imap_config, auth_ptr.?);
+        log.info("IMAP server configured on port {d}", .{imap_port});
+    }
+    defer if (imap_server) |*is| is.deinit();
+
     // Log startup summary
     log.info("Starting SMTP server...", .{});
+    log.info("  IMAP enabled: {}", .{imap_server != null});
     log.info("  Cluster mode: {}", .{enable_cluster});
     log.info("  Multi-tenancy: {}", .{tenant_manager != null});
     log.info("  Metrics: {}", .{smtp_metrics != null});
     log.info("  Alerting: {}", .{alert_manager != null});
 
+    // Start IMAP server in a separate thread
+    if (imap_server) |*is| {
+        imap_thread = try std.Thread.spawn(.{}, struct {
+            fn run(imap_srv: *imap.ImapServer) void {
+                imap_srv.start() catch |err| {
+                    std.log.err("IMAP server error: {}", .{err});
+                };
+            }
+        }.run, .{is});
+        log.info("IMAP Server listening on 0.0.0.0:{d}", .{imap_port});
+    }
+
     server.startWithReload(&shutdown_requested, &reload_requested, reloadConfigCallback) catch |err| {
         log.critical("Server error: {}", .{err});
+        // Stop IMAP server on error
+        if (imap_server) |*is| {
+            is.stop();
+        }
+        if (imap_thread) |t| {
+            t.join();
+        }
         return err;
     };
+
+    // Stop IMAP server on shutdown
+    if (imap_server) |*is| {
+        is.stop();
+        log.info("IMAP server stopped", .{});
+    }
+    if (imap_thread) |t| {
+        t.join();
+    }
 
     // Cleanup
     if (cluster_manager) |cm| {
