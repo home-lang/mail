@@ -7,6 +7,7 @@ const database = @import("storage/database.zig");
 const auth = @import("auth/auth.zig");
 const greylist_mod = @import("antispam/greylist.zig");
 const imap = @import("protocol/imap.zig");
+const caldav = @import("protocol/caldav.zig");
 
 // Cluster and multi-tenancy support
 const cluster = @import("infrastructure/cluster.zig");
@@ -295,9 +296,40 @@ pub fn main() !void {
     }
     defer if (imap_server) |*is| is.deinit();
 
+    // Initialize CalDAV/CardDAV server if auth is enabled
+    var caldav_server: ?caldav.CalDavServer = null;
+    var caldav_thread: ?std.Thread = null;
+    const enable_caldav = std.posix.getenv("CALDAV_ENABLED") != null or cfg.enable_auth;
+    const caldav_port: u16 = blk: {
+        const port_str = std.posix.getenv("CALDAV_PORT") orelse "80";
+        break :blk std.fmt.parseInt(u16, port_str, 10) catch 80;
+    };
+    const caldav_ssl_port: u16 = blk: {
+        const port_str = std.posix.getenv("CALDAV_SSL_PORT") orelse "443";
+        break :blk std.fmt.parseInt(u16, port_str, 10) catch 443;
+    };
+
+    if (enable_caldav and auth_ptr != null) {
+        const caldav_config = caldav.CalDavConfig{
+            .port = caldav_port,
+            .ssl_port = caldav_ssl_port,
+            .enable_ssl = cfg.enable_tls,
+            .max_connections = @intCast(cfg.max_connections),
+            .cert_path = cfg.tls_cert_path,
+            .key_path = cfg.tls_key_path,
+        };
+        caldav_server = caldav.CalDavServer.init(allocator, caldav_config, auth_ptr.?);
+        log.info("CalDAV/CardDAV server configured on port {d}", .{caldav_port});
+        if (cfg.enable_tls and cfg.tls_cert_path != null) {
+            log.info("CalDAV SSL server configured on port {d} (HTTPS)", .{caldav_ssl_port});
+        }
+    }
+    defer if (caldav_server) |*cs| cs.deinit();
+
     // Log startup summary
     log.info("Starting SMTP server...", .{});
     log.info("  IMAP enabled: {}", .{imap_server != null});
+    log.info("  CalDAV enabled: {}", .{caldav_server != null});
     log.info("  Cluster mode: {}", .{enable_cluster});
     log.info("  Multi-tenancy: {}", .{tenant_manager != null});
     log.info("  Metrics: {}", .{smtp_metrics != null});
@@ -315,6 +347,21 @@ pub fn main() !void {
         log.info("IMAP Server listening on 0.0.0.0:{d}", .{imap_port});
     }
 
+    // Start CalDAV server in a separate thread
+    if (caldav_server) |*cs| {
+        caldav_thread = try std.Thread.spawn(.{}, struct {
+            fn run(caldav_srv: *caldav.CalDavServer) void {
+                caldav_srv.start() catch |err| {
+                    std.log.err("CalDAV server error: {}", .{err});
+                };
+            }
+        }.run, .{cs});
+        log.info("CalDAV Server listening on 0.0.0.0:{d}", .{caldav_port});
+        if (cfg.enable_tls and cfg.tls_cert_path != null) {
+            log.info("CalDAV SSL Server listening on 0.0.0.0:{d}", .{caldav_ssl_port});
+        }
+    }
+
     server.startWithReload(&shutdown_requested, &reload_requested, reloadConfigCallback) catch |err| {
         log.critical("Server error: {}", .{err});
         // Stop IMAP server on error
@@ -322,6 +369,13 @@ pub fn main() !void {
             is.stop();
         }
         if (imap_thread) |t| {
+            t.join();
+        }
+        // Stop CalDAV server on error
+        if (caldav_server) |*cs| {
+            cs.stop();
+        }
+        if (caldav_thread) |t| {
             t.join();
         }
         return err;
@@ -333,6 +387,15 @@ pub fn main() !void {
         log.info("IMAP server stopped", .{});
     }
     if (imap_thread) |t| {
+        t.join();
+    }
+
+    // Stop CalDAV server on shutdown
+    if (caldav_server) |*cs| {
+        cs.stop();
+        log.info("CalDAV server stopped", .{});
+    }
+    if (caldav_thread) |t| {
         t.join();
     }
 

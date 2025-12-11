@@ -353,6 +353,8 @@ pub const ImapSession = struct {
     command_buffer: std.ArrayList(u8),
     idle_mode: bool = false,
     auth_backend: *auth.AuthBackend,
+    // TLS support for encrypted responses
+    tls_connection: ?*tls.nonblock.Connection = null,
 
     pub fn init(allocator: std.mem.Allocator, connection: socket.Connection, auth_backend: *auth.AuthBackend) ImapSession {
         return .{
@@ -361,7 +363,13 @@ pub const ImapSession = struct {
             .state = .not_authenticated,
             .command_buffer = std.ArrayList(u8){},
             .auth_backend = auth_backend,
+            .tls_connection = null,
         };
+    }
+
+    /// Set the TLS connection for encrypted I/O
+    pub fn setTlsConnection(self: *ImapSession, tls_conn: *tls.nonblock.Connection) void {
+        self.tls_connection = tls_conn;
     }
 
     pub fn deinit(self: *ImapSession) void {
@@ -374,10 +382,34 @@ pub const ImapSession = struct {
         self.command_buffer.deinit(self.allocator);
     }
 
+    /// Write data to connection (plain or TLS encrypted)
+    fn writeData(self: *ImapSession, data: []const u8) !void {
+        if (self.tls_connection) |tls_conn| {
+            // TLS encrypted write
+            var send_buf: [tls.output_buffer_len]u8 = undefined;
+            const enc_result = tls_conn.encrypt(data, &send_buf) catch |err| {
+                logger.err("Failed to encrypt IMAP response: {}", .{err});
+                return error.TlsEncryptFailed;
+            };
+            var sent: usize = 0;
+            while (sent < enc_result.ciphertext.len) {
+                const n = self.connection.write(enc_result.ciphertext[sent..]) catch |err| {
+                    logger.err("Failed to write encrypted IMAP response: {}", .{err});
+                    return err;
+                };
+                if (n == 0) return error.ConnectionClosed;
+                sent += n;
+            }
+        } else {
+            // Plain text write
+            _ = try self.connection.write(data);
+        }
+    }
+
     /// Send greeting
     pub fn sendGreeting(self: *ImapSession) !void {
         const greeting = "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN] SMTP Server IMAP4rev1 ready\r\n";
-        _ = try self.connection.write(greeting);
+        try self.writeData(greeting);
     }
 
     /// Send response
@@ -387,7 +419,7 @@ pub const ImapSession = struct {
         const writer = fbs.writer();
         try writer.print("{s} {s} {s}\r\n", .{ tag, status, message });
 
-        _ = try self.connection.write(fbs.getWritten());
+        try self.writeData(fbs.getWritten());
     }
 
     /// Send untagged response
@@ -397,7 +429,7 @@ pub const ImapSession = struct {
         const writer = fbs.writer();
         try writer.print("* {s}\r\n", .{message});
 
-        _ = try self.connection.write(fbs.getWritten());
+        try self.writeData(fbs.getWritten());
     }
 
     /// Handle CAPABILITY command
@@ -854,18 +886,21 @@ pub const ImapServer = struct {
 
                 // Send data to client if any
                 if (result.send.len > 0) {
+                    logger.info("TLS handshake: preparing to send {d} bytes", .{result.send.len});
                     var sent: usize = 0;
                     while (sent < result.send.len) {
                         const n = connection.write(result.send[sent..]) catch |err| {
                             logger.err("TLS handshake write error: {}", .{err});
                             return error.TlsHandshakeFailed;
                         };
+                        logger.info("TLS handshake: wrote {d} bytes (total sent: {d}/{d})", .{ n, sent + n, result.send.len });
                         if (n == 0) {
                             logger.err("TLS handshake: connection closed during write", .{});
                             return error.TlsHandshakeFailed;
                         }
                         sent += n;
                     }
+                    logger.info("TLS handshake: finished sending all {d} bytes", .{result.send.len});
                 }
 
                 // Read more data from client if handshake not done
@@ -891,19 +926,14 @@ pub const ImapServer = struct {
             // TLS encrypted session using nonblock connection
             var tls_conn = tls.nonblock.Connection.init(cipher);
 
-            // Send greeting over TLS
-            const greeting = "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN] SMTP Server IMAP4rev1 ready\r\n";
-            var send_buf: [tls.output_buffer_len]u8 = undefined;
-            const enc_result = tls_conn.encrypt(greeting, &send_buf) catch |err| {
-                logger.err("Failed to encrypt IMAP greeting: {}", .{err});
+            // Set TLS connection on session so all responses are encrypted
+            session.setTlsConnection(&tls_conn);
+
+            // Send greeting over TLS (now using session's TLS-aware write)
+            session.sendGreeting() catch |err| {
+                logger.err("Failed to send IMAP greeting: {}", .{err});
                 return;
             };
-            var sent: usize = 0;
-            while (sent < enc_result.ciphertext.len) {
-                const n = connection.write(enc_result.ciphertext[sent..]) catch break;
-                if (n == 0) break;
-                sent += n;
-            }
 
             // Read and process commands over TLS
             var recv_buf: [tls.input_buffer_len]u8 = undefined;
@@ -931,14 +961,11 @@ pub const ImapServer = struct {
                 // Handle decrypted data
                 if (dec_result.cleartext.len > 0) {
                     const line = std.mem.trim(u8, dec_result.cleartext, "\r\n");
+                    // Now session.processCommand will use TLS for responses
                     session.processCommand(line) catch |err| {
                         logger.err("IMAP command processing error: {}", .{err});
                         break;
                     };
-
-                    // For TLS session, override sendResponse to use TLS
-                    // Note: This is a simplified implementation - proper impl would
-                    // integrate TLS into the session's write methods
                 }
 
                 // Remove consumed ciphertext

@@ -6,7 +6,7 @@ pub const PasswordHasher = struct {
     allocator: std.mem.Allocator,
 
     const hash_len = 32;
-    const salt_len = 16;
+    const salt_len = 16; // Standard Argon2 uses 16-byte salt (Bun's default)
     const encoded_len = 128; // Enough for argon2id encoded format
 
     pub fn init(allocator: std.mem.Allocator) PasswordHasher {
@@ -34,8 +34,8 @@ pub const PasswordHasher = struct {
             .argon2id,
         );
 
-        // Encode salt and hash as base64
-        const encoder = std.base64.standard.Encoder;
+        // Encode salt and hash as base64 (no padding - standard for Argon2)
+        const encoder = std.base64.standard_no_pad.Encoder;
         const salt_b64_len = encoder.calcSize(salt.len);
         const hash_b64_len = encoder.calcSize(hash.len);
 
@@ -75,8 +75,22 @@ pub const PasswordHasher = struct {
         // Skip version
         _ = parts.next();
 
-        // Skip parameters
-        _ = parts.next();
+        // Parse parameters (m=65536,t=3,p=4)
+        const params_str = parts.next() orelse return error.InvalidHashFormat;
+        var m: u32 = 65536;
+        var t: u32 = 3;
+        var p: u24 = 4;
+
+        var param_parts = std.mem.splitScalar(u8, params_str, ',');
+        while (param_parts.next()) |param| {
+            if (std.mem.startsWith(u8, param, "m=")) {
+                m = std.fmt.parseInt(u32, param[2..], 10) catch 65536;
+            } else if (std.mem.startsWith(u8, param, "t=")) {
+                t = std.fmt.parseInt(u32, param[2..], 10) catch 3;
+            } else if (std.mem.startsWith(u8, param, "p=")) {
+                p = std.fmt.parseInt(u24, param[2..], 10) catch 4;
+            }
+        }
 
         // Get salt base64
         const salt_b64 = parts.next() orelse return error.InvalidHashFormat;
@@ -84,16 +98,17 @@ pub const PasswordHasher = struct {
         // Get hash base64
         const hash_b64 = parts.next() orelse return error.InvalidHashFormat;
 
-        // Decode salt and hash from base64
-        const decoder = std.base64.standard.Decoder;
+        // Decode salt and hash from base64 (no padding required)
+        // The stored hashes use base64 without padding characters
+        const decoder = std.base64.standard_no_pad.Decoder;
 
         var salt: [salt_len]u8 = undefined;
-        try decoder.decode(&salt, salt_b64);
+        decoder.decode(&salt, salt_b64) catch return error.InvalidHashFormat;
 
         var expected_hash: [hash_len]u8 = undefined;
-        try decoder.decode(&expected_hash, hash_b64);
+        decoder.decode(&expected_hash, hash_b64) catch return error.InvalidHashFormat;
 
-        // Hash the provided password with the same salt
+        // Hash the provided password with the same salt and parsed parameters
         var computed_hash: [hash_len]u8 = undefined;
         try crypto.pwhash.argon2.kdf(
             self.allocator,
@@ -101,9 +116,9 @@ pub const PasswordHasher = struct {
             password,
             &salt,
             .{
-                .t = 3,
-                .m = 65536,
-                .p = 4,
+                .t = t,
+                .m = m,
+                .p = p,
             },
             .argon2id,
         );

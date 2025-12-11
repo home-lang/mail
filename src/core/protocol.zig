@@ -9,6 +9,7 @@ const webhook = @import("../features/webhook.zig");
 const greylist_mod = @import("../antispam/greylist.zig");
 const tls_mod = @import("tls.zig");
 const chunking = @import("../protocol/chunking.zig");
+const tls = @import("tls");
 
 const SMTPCommand = enum {
     HELO,
@@ -37,21 +38,95 @@ const SessionState = enum {
 /// Connection wrapper that abstracts TLS and plain TCP
 const ConnectionWrapper = struct {
     tcp_conn: socket.Connection,
-    tls_conn: ?tls_mod.TlsConnection,
+    tls_conn: ?tls.nonblock.Connection,
     using_tls: bool,
+    // Buffers for TLS encryption/decryption
+    ciphertext_accum: [tls.input_buffer_len * 2]u8,
+    ciphertext_len: usize,
+    // Buffer for decrypted cleartext that hasn't been consumed yet
+    cleartext_buf: [4096]u8,
+    cleartext_start: usize,
+    cleartext_end: usize,
 
     pub fn init(tcp_conn: socket.Connection) ConnectionWrapper {
         return .{
             .tcp_conn = tcp_conn,
             .tls_conn = null,
             .using_tls = false,
+            .ciphertext_accum = undefined,
+            .ciphertext_len = 0,
+            .cleartext_buf = undefined,
+            .cleartext_start = 0,
+            .cleartext_end = 0,
         };
     }
 
     pub fn read(self: *ConnectionWrapper, buffer: []u8) !usize {
         if (self.using_tls) {
-            if (self.tls_conn) |*conn| {
-                return conn.read(buffer);
+            if (self.tls_conn) |*tls_conn| {
+                // First, return any buffered cleartext
+                if (self.cleartext_end > self.cleartext_start) {
+                    const available = self.cleartext_end - self.cleartext_start;
+                    const to_copy = @min(available, buffer.len);
+                    @memcpy(buffer[0..to_copy], self.cleartext_buf[self.cleartext_start..][0..to_copy]);
+                    self.cleartext_start += to_copy;
+                    if (self.cleartext_start == self.cleartext_end) {
+                        self.cleartext_start = 0;
+                        self.cleartext_end = 0;
+                    }
+                    return to_copy;
+                }
+
+                // Need to read and decrypt more data
+                var recv_buf: [tls.input_buffer_len]u8 = undefined;
+                const bytes_read = self.tcp_conn.read(recv_buf[0..]) catch |err| {
+                    return err;
+                };
+                if (bytes_read == 0) return 0;
+
+                // Accumulate ciphertext
+                if (self.ciphertext_len + bytes_read <= self.ciphertext_accum.len) {
+                    @memcpy(self.ciphertext_accum[self.ciphertext_len..][0..bytes_read], recv_buf[0..bytes_read]);
+                    self.ciphertext_len += bytes_read;
+                } else {
+                    return error.BufferOverflow;
+                }
+
+                // Try to decrypt
+                var decrypt_buf: [4096]u8 = undefined;
+                const dec_result = tls_conn.decrypt(self.ciphertext_accum[0..self.ciphertext_len], &decrypt_buf) catch |err| {
+                    logger.err("TLS decrypt error: {}", .{err});
+                    return error.TlsDecryptFailed;
+                };
+
+                // Remove consumed ciphertext
+                if (dec_result.ciphertext_pos > 0) {
+                    const remaining = self.ciphertext_len - dec_result.ciphertext_pos;
+                    if (remaining > 0) {
+                        std.mem.copyForwards(u8, &self.ciphertext_accum, self.ciphertext_accum[dec_result.ciphertext_pos..self.ciphertext_len]);
+                    }
+                    self.ciphertext_len = remaining;
+                }
+
+                if (dec_result.closed) return 0;
+
+                // Return decrypted data
+                if (dec_result.cleartext.len > 0) {
+                    const to_copy = @min(dec_result.cleartext.len, buffer.len);
+                    @memcpy(buffer[0..to_copy], dec_result.cleartext[0..to_copy]);
+
+                    // Buffer any excess cleartext for next read
+                    if (dec_result.cleartext.len > to_copy) {
+                        const excess = dec_result.cleartext.len - to_copy;
+                        @memcpy(self.cleartext_buf[0..excess], dec_result.cleartext[to_copy..]);
+                        self.cleartext_start = 0;
+                        self.cleartext_end = excess;
+                    }
+                    return to_copy;
+                }
+
+                // No cleartext yet, try again (TLS record not complete)
+                return self.read(buffer);
             }
             return error.TlsNotActive;
         }
@@ -60,27 +135,52 @@ const ConnectionWrapper = struct {
 
     pub fn write(self: *ConnectionWrapper, data: []const u8) !usize {
         if (self.using_tls) {
-            if (self.tls_conn) |*conn| {
-                return conn.write(data);
+            if (self.tls_conn) |*tls_conn| {
+                // Encrypt the data
+                var send_buf: [tls.output_buffer_len]u8 = undefined;
+                const enc_result = tls_conn.encrypt(data, &send_buf) catch |err| {
+                    logger.err("TLS encrypt error: {}", .{err});
+                    return error.TlsEncryptFailed;
+                };
+
+                // Write encrypted data to socket
+                var sent: usize = 0;
+                while (sent < enc_result.ciphertext.len) {
+                    const n = self.tcp_conn.write(enc_result.ciphertext[sent..]) catch |err| {
+                        return err;
+                    };
+                    if (n == 0) return error.ConnectionClosed;
+                    sent += n;
+                }
+                return data.len;
             }
             return error.TlsNotActive;
         }
         return self.tcp_conn.write(data);
     }
 
-    pub fn upgradeToTls(self: *ConnectionWrapper, tls_conn: tls_mod.TlsConnection) void {
-        self.tls_conn = tls_conn;
+    pub fn upgradeToTls(self: *ConnectionWrapper, tls_conn_param: tls.nonblock.Connection) void {
+        self.tls_conn = tls_conn_param;
         self.using_tls = true;
+        self.ciphertext_len = 0;
+        self.cleartext_start = 0;
+        self.cleartext_end = 0;
     }
 
-    pub fn upgradeWithCipher(self: *ConnectionWrapper, cipher: @import("tls").Cipher) void {
-        self.tls_conn = tls_mod.TlsConnection.initWithCipher(cipher);
+    pub fn upgradeWithCipher(self: *ConnectionWrapper, cipher: tls.Cipher) void {
+        self.tls_conn = tls.nonblock.Connection.init(cipher);
         self.using_tls = true;
+        self.ciphertext_len = 0;
+        self.cleartext_start = 0;
+        self.cleartext_end = 0;
     }
 
     pub fn deinitTls(self: *ConnectionWrapper) void {
         if (self.tls_conn) |*conn| {
-            conn.deinit();
+            var close_buf: [64]u8 = undefined;
+            if (conn.close(&close_buf)) |close_data| {
+                _ = self.tcp_conn.write(close_data) catch {};
+            } else |_| {}
             self.tls_conn = null;
         }
         self.using_tls = false;
@@ -846,8 +946,7 @@ pub const Session = struct {
 
         self.logger.info("STARTTLS command accepted - starting TLS handshake", .{});
 
-        // Perform TLS handshake using non-blocking API
-        const tls = @import("tls");
+        // Perform TLS handshake using non-blocking API (uses global tls import)
 
         // Load certificate and key
         const cert_path = self.tls_context.?.config.cert_path orelse return error.TlsNotConfigured;

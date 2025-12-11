@@ -144,7 +144,16 @@ pub const Server = struct {
                 else => error.Unexpected,
             };
         }
-        return .{ .fd = @intCast(rc) };
+        const fd: posix.socket_t = @intCast(rc);
+
+        // Set TCP_NODELAY to disable Nagle's algorithm for TLS handshake
+        // This ensures all TLS records are sent immediately without coalescing
+        const one: c_int = 1;
+        // TCP_NODELAY = 1 on Linux, macOS, and most POSIX systems
+        const TCP_NODELAY: u32 = 1;
+        _ = posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_NODELAY, std.mem.asBytes(&one)) catch {};
+
+        return .{ .fd = fd };
     }
 
     pub fn close(self: *Server) void {

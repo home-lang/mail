@@ -1,23 +1,150 @@
 const std = @import("std");
+const posix = std.posix;
 const database = @import("../storage/database.zig");
 const password_mod = @import("password.zig");
+
+/// Get current unix timestamp in seconds
+fn getCurrentTimestamp() i64 {
+    const ts = posix.clock_gettime(.REALTIME) catch return 0;
+    return ts.sec;
+}
+
+/// Convert bytes to lowercase hex string
+fn bytesToHex(bytes: []const u8, out: []u8) void {
+    const hex_chars = "0123456789abcdef";
+    for (bytes, 0..) |b, i| {
+        out[i * 2] = hex_chars[b >> 4];
+        out[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+}
 
 pub const Credentials = struct {
     username: []const u8,
     password: []const u8,
 };
 
+/// HTTP Digest Authentication parameters (RFC 7616)
+pub const DigestAuthParams = struct {
+    username: []const u8,
+    realm: []const u8,
+    nonce: []const u8,
+    uri: []const u8,
+    response: []const u8,
+    qop: ?[]const u8 = null,
+    nc: ?[]const u8 = null,
+    cnonce: ?[]const u8 = null,
+    algorithm: ?[]const u8 = null,
+
+    pub fn deinit(self: *DigestAuthParams, allocator: std.mem.Allocator) void {
+        allocator.free(self.username);
+        allocator.free(self.realm);
+        allocator.free(self.nonce);
+        allocator.free(self.uri);
+        allocator.free(self.response);
+        if (self.qop) |q| allocator.free(q);
+        if (self.nc) |n| allocator.free(n);
+        if (self.cnonce) |c| allocator.free(c);
+        if (self.algorithm) |a| allocator.free(a);
+    }
+};
+
+/// Nonce manager for Digest authentication
+pub const NonceManager = struct {
+    allocator: std.mem.Allocator,
+    nonces: std.StringHashMap(i64), // nonce -> creation timestamp
+    max_age_seconds: i64 = 300, // 5 minutes
+
+    pub fn init(allocator: std.mem.Allocator) NonceManager {
+        return .{
+            .allocator = allocator,
+            .nonces = std.StringHashMap(i64).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *NonceManager) void {
+        var iter = self.nonces.keyIterator();
+        while (iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.nonces.deinit();
+    }
+
+    /// Generate a new nonce
+    pub fn generateNonce(self: *NonceManager) ![]const u8 {
+        var random_bytes: [16]u8 = undefined;
+        std.crypto.random.bytes(&random_bytes);
+
+        const now = getCurrentTimestamp();
+
+        // Create nonce: hex(random) + ":" + timestamp
+        // 32 hex chars + 1 colon + up to 20 digits for timestamp
+        var hex_buf: [32]u8 = undefined;
+        bytesToHex(&random_bytes, &hex_buf);
+
+        var nonce_buf: [64]u8 = undefined;
+        const nonce_str = std.fmt.bufPrint(&nonce_buf, "{s}:{d}", .{
+            hex_buf[0..],
+            now,
+        }) catch return error.NonceGenerationFailed;
+
+        const nonce = try self.allocator.dupe(u8, nonce_str);
+        try self.nonces.put(nonce, now);
+
+        return nonce;
+    }
+
+    /// Validate a nonce (check it exists and hasn't expired)
+    pub fn validateNonce(self: *NonceManager, nonce: []const u8) bool {
+        const created = self.nonces.get(nonce) orelse return false;
+        const now = getCurrentTimestamp();
+        return (now - created) < self.max_age_seconds;
+    }
+
+    /// Remove a used nonce (for one-time use)
+    pub fn invalidateNonce(self: *NonceManager, nonce: []const u8) void {
+        if (self.nonces.fetchRemove(nonce)) |entry| {
+            self.allocator.free(entry.key);
+        }
+    }
+
+    /// Cleanup expired nonces
+    pub fn cleanup(self: *NonceManager) void {
+        const now = getCurrentTimestamp();
+        var to_remove = std.ArrayList([]const u8).init(self.allocator);
+        defer to_remove.deinit();
+
+        var iter = self.nonces.iterator();
+        while (iter.next()) |entry| {
+            if ((now - entry.value_ptr.*) >= self.max_age_seconds) {
+                to_remove.append(entry.key_ptr.*) catch continue;
+            }
+        }
+
+        for (to_remove.items) |key| {
+            if (self.nonces.fetchRemove(key)) |entry| {
+                self.allocator.free(entry.key);
+            }
+        }
+    }
+};
+
 pub const AuthBackend = struct {
     db: *database.Database,
     password_hasher: password_mod.PasswordHasher,
     allocator: std.mem.Allocator,
+    nonce_manager: NonceManager,
 
     pub fn init(allocator: std.mem.Allocator, db: *database.Database) AuthBackend {
         return .{
             .db = db,
             .password_hasher = password_mod.PasswordHasher.init(allocator),
             .allocator = allocator,
+            .nonce_manager = NonceManager.init(allocator),
         };
+    }
+
+    pub fn deinit(self: *AuthBackend) void {
+        self.nonce_manager.deinit();
     }
 
     pub fn verifyCredentials(self: *AuthBackend, username: []const u8, password: []const u8) !bool {
@@ -94,6 +221,141 @@ pub const AuthBackend = struct {
         // Return username
         return try self.allocator.dupe(u8, creds.username);
     }
+
+    /// Verify HTTP Digest Auth header and return username if valid
+    /// Format: "Digest username="...", realm="...", nonce="...", uri="...", response="...", ..."
+    pub fn verifyDigestAuth(self: *AuthBackend, auth_header: []const u8, method: []const u8, realm: []const u8) !?[]const u8 {
+        const log = @import("../core/logger.zig");
+
+        // Check for "Digest " prefix
+        if (!std.mem.startsWith(u8, auth_header, "Digest ")) {
+            log.warn("Digest auth: missing 'Digest ' prefix", .{});
+            return null;
+        }
+
+        // Parse Digest parameters
+        var params = try parseDigestAuthHeader(self.allocator, auth_header[7..]);
+        defer params.deinit(self.allocator);
+
+        log.info("Digest auth: username={s}, realm={s}, uri={s}", .{ params.username, params.realm, params.uri });
+
+        // Verify realm matches
+        if (!std.mem.eql(u8, params.realm, realm)) {
+            log.warn("Digest auth: realm mismatch - got '{s}', expected '{s}'", .{ params.realm, realm });
+            return null;
+        }
+
+        // Verify nonce is valid
+        if (!self.nonce_manager.validateNonce(params.nonce)) {
+            log.warn("Digest auth: invalid/expired nonce", .{});
+            return null;
+        }
+
+        // Normalize username - extract local part if email
+        const normalized_username = blk: {
+            if (std.mem.indexOf(u8, params.username, "@")) |at_pos| {
+                break :blk params.username[0..at_pos];
+            }
+            break :blk params.username;
+        };
+
+        log.info("Digest auth: normalized username={s}", .{normalized_username});
+
+        // Get user from database
+        var user = self.db.getUserByUsername(normalized_username) catch |err| {
+            if (err == database.DatabaseError.NotFound) {
+                log.warn("Digest auth: user '{s}' not found in database", .{normalized_username});
+                return null;
+            }
+            return err;
+        };
+        defer user.deinit(self.allocator);
+
+        if (!user.enabled) {
+            log.warn("Digest auth: user '{s}' is disabled", .{normalized_username});
+            return null;
+        }
+
+        // Get the stored HA1 (MD5(username:realm:password)) for Digest auth
+        const ha1 = user.digest_ha1 orelse {
+            // No HA1 stored, cannot verify Digest auth
+            log.warn("Digest auth: no HA1 stored for user '{s}'", .{normalized_username});
+            return null;
+        };
+
+        log.info("Digest auth: found stored HA1={s}", .{ha1});
+
+        // Compute HA2 = MD5(method:uri)
+        var ha2_input_buf: [512]u8 = undefined;
+        const ha2_input = std.fmt.bufPrint(&ha2_input_buf, "{s}:{s}", .{ method, params.uri }) catch return null;
+
+        var ha2_hash: [16]u8 = undefined;
+        std.crypto.hash.Md5.hash(ha2_input, &ha2_hash, .{});
+        var ha2_hex: [32]u8 = undefined;
+        bytesToHex(&ha2_hash, &ha2_hex);
+
+        // Compute expected response based on qop
+        var expected_response_buf: [1024]u8 = undefined;
+        var expected_response: []const u8 = undefined;
+
+        if (params.qop) |qop| {
+            // qop=auth: response = MD5(HA1:nonce:nc:cnonce:qop:HA2)
+            const nc = params.nc orelse return null;
+            const cnonce = params.cnonce orelse return null;
+
+            expected_response = std.fmt.bufPrint(&expected_response_buf, "{s}:{s}:{s}:{s}:{s}:{s}", .{
+                ha1,
+                params.nonce,
+                nc,
+                cnonce,
+                qop,
+                ha2_hex[0..],
+            }) catch return null;
+        } else {
+            // No qop: response = MD5(HA1:nonce:HA2)
+            expected_response = std.fmt.bufPrint(&expected_response_buf, "{s}:{s}:{s}", .{
+                ha1,
+                params.nonce,
+                ha2_hex[0..],
+            }) catch return null;
+        }
+
+        // Hash the expected response string
+        var expected_hash: [16]u8 = undefined;
+        std.crypto.hash.Md5.hash(expected_response, &expected_hash, .{});
+        var expected_hex: [32]u8 = undefined;
+        bytesToHex(&expected_hash, &expected_hex);
+
+        // Compare with client's response (case-insensitive for hex)
+        var client_response_lower: [32]u8 = undefined;
+        if (params.response.len != 32) {
+            log.warn("Digest auth: client response wrong length ({d} vs 32)", .{params.response.len});
+            return null;
+        }
+        for (params.response, 0..) |c, i| {
+            client_response_lower[i] = if (c >= 'A' and c <= 'F') c + 32 else c;
+        }
+
+        log.info("Digest auth: expected={s}, client={s}", .{ expected_hex, client_response_lower });
+
+        if (!std.mem.eql(u8, &expected_hex, &client_response_lower)) {
+            // Response mismatch - authentication failed
+            log.warn("Digest auth: response mismatch!", .{});
+            return null;
+        }
+
+        log.info("Digest auth: SUCCESS for user {s}", .{normalized_username});
+
+        // Mark nonce as used (prevents replay attacks)
+        self.nonce_manager.invalidateNonce(params.nonce);
+
+        return try self.allocator.dupe(u8, normalized_username);
+    }
+
+    /// Generate a new nonce for Digest authentication
+    pub fn generateNonce(self: *AuthBackend) ![]const u8 {
+        return try self.nonce_manager.generateNonce();
+    }
 };
 
 /// Decode SASL PLAIN base64 authentication (SMTP/IMAP/POP3)
@@ -144,6 +406,108 @@ pub fn decodeBasicAuthCredentials(allocator: std.mem.Allocator, encoded: []const
     };
 }
 
+/// Parse HTTP Digest Authentication header
+/// Format: key1="value1", key2="value2", ...
+pub fn parseDigestAuthHeader(allocator: std.mem.Allocator, header: []const u8) !DigestAuthParams {
+    var username: ?[]const u8 = null;
+    var realm: ?[]const u8 = null;
+    var nonce: ?[]const u8 = null;
+    var uri: ?[]const u8 = null;
+    var response: ?[]const u8 = null;
+    var qop: ?[]const u8 = null;
+    var nc: ?[]const u8 = null;
+    var cnonce: ?[]const u8 = null;
+    var algorithm: ?[]const u8 = null;
+
+    // Parse comma-separated key="value" pairs
+    var pos: usize = 0;
+    while (pos < header.len) {
+        // Skip whitespace and commas
+        while (pos < header.len and (header[pos] == ' ' or header[pos] == ',' or header[pos] == '\t')) {
+            pos += 1;
+        }
+        if (pos >= header.len) break;
+
+        // Find key
+        const key_start = pos;
+        while (pos < header.len and header[pos] != '=' and header[pos] != ' ') {
+            pos += 1;
+        }
+        const key = header[key_start..pos];
+
+        // Skip '='
+        while (pos < header.len and (header[pos] == '=' or header[pos] == ' ')) {
+            pos += 1;
+        }
+        if (pos >= header.len) break;
+
+        // Parse value (quoted or unquoted)
+        var value: []const u8 = undefined;
+        if (header[pos] == '"') {
+            pos += 1; // Skip opening quote
+            const value_start = pos;
+            while (pos < header.len and header[pos] != '"') {
+                pos += 1;
+            }
+            value = header[value_start..pos];
+            if (pos < header.len) pos += 1; // Skip closing quote
+        } else {
+            const value_start = pos;
+            while (pos < header.len and header[pos] != ',' and header[pos] != ' ') {
+                pos += 1;
+            }
+            value = header[value_start..pos];
+        }
+
+        // Store parsed value
+        if (std.mem.eql(u8, key, "username")) {
+            username = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "realm")) {
+            realm = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "nonce")) {
+            nonce = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "uri")) {
+            uri = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "response")) {
+            response = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "qop")) {
+            qop = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "nc")) {
+            nc = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "cnonce")) {
+            cnonce = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "algorithm")) {
+            algorithm = try allocator.dupe(u8, value);
+        }
+    }
+
+    // Validate required fields
+    if (username == null or realm == null or nonce == null or uri == null or response == null) {
+        if (username) |u| allocator.free(u);
+        if (realm) |r| allocator.free(r);
+        if (nonce) |n| allocator.free(n);
+        if (uri) |u| allocator.free(u);
+        if (response) |r| allocator.free(r);
+        if (qop) |q| allocator.free(q);
+        if (nc) |n| allocator.free(n);
+        if (cnonce) |c| allocator.free(c);
+        if (algorithm) |a| allocator.free(a);
+        return error.InvalidAuthFormat;
+    }
+
+    return DigestAuthParams{
+        .username = username.?,
+        .realm = realm.?,
+        .nonce = nonce.?,
+        .uri = uri.?,
+        .response = response.?,
+        .qop = qop,
+        .nc = nc,
+        .cnonce = cnonce,
+        .algorithm = algorithm,
+    };
+}
+
 // =============================================================================
 // Password Reset Flow
 // =============================================================================
@@ -167,7 +531,9 @@ pub const ResetToken = struct {
 
     /// Generate token string for URL
     pub fn toUrlToken(self: *const ResetToken, allocator: std.mem.Allocator) ![]u8 {
-        return try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&self.token)});
+        var hex_buf: [64]u8 = undefined;
+        bytesToHex(&self.token, &hex_buf);
+        return try allocator.dupe(u8, &hex_buf);
     }
 
     /// Check if token is expired
@@ -214,7 +580,7 @@ pub const ResetRateLimiter = struct {
 
     /// Check if a request is allowed
     pub fn checkAllowed(self: *ResetRateLimiter, identifier: []const u8) RateLimitResult {
-        const now = std.time.timestamp();
+        const now = getCurrentTimestamp();
 
         if (self.attempts.getPtr(identifier)) |info| {
             // Check if locked out
@@ -258,7 +624,7 @@ pub const ResetRateLimiter = struct {
 
     /// Record an attempt
     pub fn recordAttempt(self: *ResetRateLimiter, identifier: []const u8) !void {
-        const now = std.time.timestamp();
+        const now = getCurrentTimestamp();
 
         const result = try self.attempts.getOrPut(try self.allocator.dupe(u8, identifier));
         if (result.found_existing) {
@@ -364,7 +730,7 @@ pub const PasswordResetManager = struct {
         email: []const u8,
         ip_address: ?[]const u8,
     ) !ResetRequestResult {
-        const now = std.time.timestamp();
+        const now = getCurrentTimestamp();
 
         // Check rate limiting by email
         const rate_result = self.rate_limiter.checkAllowed(email);
@@ -430,7 +796,7 @@ pub const PasswordResetManager = struct {
 
         // Store token (keyed by hash)
         var hash_hex: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&token_hash)}) catch unreachable;
+        bytesToHex(&token_hash, &hash_hex);
         const key = try self.allocator.dupe(u8, &hash_hex);
         try self.tokens.put(key, token);
 
@@ -459,7 +825,7 @@ pub const PasswordResetManager = struct {
         new_password: []const u8,
         ip_address: ?[]const u8,
     ) !ResetCompleteResult {
-        const now = std.time.timestamp();
+        const now = getCurrentTimestamp();
 
         // Decode token
         if (token_hex.len != 64) {
@@ -482,7 +848,7 @@ pub const PasswordResetManager = struct {
         std.crypto.hash.sha2.Sha256.hash(&token_bytes, &token_hash, .{});
 
         var hash_hex: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&token_hash)}) catch unreachable;
+        bytesToHex(&token_hash, &hash_hex);
 
         // Look up token
         const token_ptr = self.tokens.getPtr(&hash_hex) orelse {
@@ -622,7 +988,7 @@ pub const PasswordResetManager = struct {
 
     /// Clean up expired tokens
     pub fn cleanupExpiredTokens(self: *PasswordResetManager) usize {
-        const now = std.time.timestamp();
+        const now = getCurrentTimestamp();
         var removed: usize = 0;
 
         var iter = self.tokens.iterator();
@@ -715,7 +1081,7 @@ pub const ResetEmailNotifier = struct {
         expiry_minutes: u32,
     ) !void {
         var token_hex: [64]u8 = undefined;
-        _ = try std.fmt.bufPrint(&token_hex, "{}", .{std.fmt.fmtSliceHexLower(&token)});
+        bytesToHex(&token, &token_hex);
 
         const reset_link = try std.fmt.allocPrint(self.allocator, "{s}/reset-password?token={s}", .{
             self.base_url,
@@ -763,7 +1129,7 @@ pub const ResetEmailNotifier = struct {
         , .{
             username,
             ip_address orelse "Unknown",
-            std.time.timestamp(),
+            getCurrentTimestamp(),
         });
         defer self.allocator.free(body);
 

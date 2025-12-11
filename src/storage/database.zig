@@ -149,11 +149,13 @@ pub const User = struct {
     enabled: bool,
     created_at: i64,
     updated_at: i64,
+    digest_ha1: ?[]const u8 = null, // MD5(username:realm:password) for Digest auth
 
     pub fn deinit(self: *User, allocator: std.mem.Allocator) void {
         allocator.free(self.username);
         allocator.free(self.password_hash);
         allocator.free(self.email);
+        if (self.digest_ha1) |ha1| allocator.free(ha1);
     }
 };
 
@@ -341,7 +343,7 @@ pub const Database = struct {
         defer self.mutex.unlock();
 
         const sql =
-            \\SELECT id, username, password_hash, email, enabled, created_at, updated_at
+            \\SELECT id, username, password_hash, email, enabled, created_at, updated_at, digest_ha1
             \\FROM users
             \\WHERE username = ?1
         ;
@@ -374,6 +376,13 @@ pub const Database = struct {
         const created_at = sqlite.sqlite3_column_int64(stmt, 5);
         const updated_at = sqlite.sqlite3_column_int64(stmt, 6);
 
+        // Get digest_ha1 (may be NULL)
+        const digest_ha1_ptr = sqlite.sqlite3_column_text(stmt, 7);
+        const digest_ha1: ?[]const u8 = if (digest_ha1_ptr != null)
+            try self.allocator.dupe(u8, std.mem.span(digest_ha1_ptr))
+        else
+            null;
+
         return User{
             .id = id,
             .username = try self.allocator.dupe(u8, std.mem.span(username_ptr)),
@@ -382,6 +391,7 @@ pub const Database = struct {
             .enabled = enabled,
             .created_at = created_at,
             .updated_at = updated_at,
+            .digest_ha1 = digest_ha1,
         };
     }
 
