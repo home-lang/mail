@@ -950,14 +950,23 @@ const TlsCalDavSession = struct {
             return true;
         };
 
-        // Handle .well-known autodiscovery BEFORE authentication (per RFC 5785)
-        if (std.mem.startsWith(u8, path, "/.well-known/caldav")) {
-            try self.sendTls("HTTP/1.1 301 Moved Permanently\r\nLocation: /calendars/\r\nContent-Length: 0\r\n\r\n");
-            return true;
-        }
-        if (std.mem.startsWith(u8, path, "/.well-known/carddav")) {
-            try self.sendTls("HTTP/1.1 301 Moved Permanently\r\nLocation: /addressbooks/\r\nContent-Length: 0\r\n\r\n");
-            return true;
+        // Handle .well-known autodiscovery
+        // For PROPFIND, we need to authenticate and return proper discovery response
+        // For GET, we can redirect
+        const is_well_known_caldav = std.mem.startsWith(u8, path, "/.well-known/caldav");
+        const is_well_known_carddav = std.mem.startsWith(u8, path, "/.well-known/carddav");
+
+        if (is_well_known_caldav or is_well_known_carddav) {
+            // For non-PROPFIND methods, just redirect
+            if (method != .propfind) {
+                if (is_well_known_caldav) {
+                    try self.sendTls("HTTP/1.1 301 Moved Permanently\r\nLocation: /calendars/\r\nContent-Length: 0\r\n\r\n");
+                } else {
+                    try self.sendTls("HTTP/1.1 301 Moved Permanently\r\nLocation: /addressbooks/\r\nContent-Length: 0\r\n\r\n");
+                }
+                return true;
+            }
+            // For PROPFIND, fall through to authentication and handle below
         }
 
         // Check authentication (Digest or Basic Auth)
@@ -1032,18 +1041,24 @@ const TlsCalDavSession = struct {
 
         // Handle PROPFIND
         if (method == .propfind) {
-            // Check if this is an addressbook (CardDAV) or calendar (CalDAV) request
-            const is_addressbook = std.mem.startsWith(u8, path, "/addressbooks");
+            // Get the authenticated username for principal URLs
+            const username = self.username orelse "user";
 
-            var response_body_buf: [2048]u8 = undefined;
+            // Check path type for different responses
+            const is_addressbook = std.mem.startsWith(u8, path, "/addressbooks");
+            const is_principals = std.mem.startsWith(u8, path, "/principals");
+            const is_well_known = std.mem.startsWith(u8, path, "/.well-known/");
+            const is_root = std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "") or is_well_known;
+
+            var response_body_buf: [4096]u8 = undefined;
             var response_fbs = io_compat.fixedBufferStream(&response_body_buf);
             const response_writer = response_fbs.writer();
 
-            if (is_addressbook) {
-                // CardDAV response for addressbooks
+            if (is_principals or is_root) {
+                // Principal discovery - return current-user-principal, calendar-home-set, addressbook-home-set
                 try response_writer.writeAll(
                     \\<?xml version="1.0" encoding="utf-8" ?>
-                    \\<D:multistatus xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+                    \\<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
                     \\  <D:response>
                     \\    <D:href>
                 );
@@ -1052,6 +1067,61 @@ const TlsCalDavSession = struct {
                     \\</D:href>
                     \\    <D:propstat>
                     \\      <D:prop>
+                    \\        <D:current-user-principal>
+                    \\          <D:href>/principals/
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\/</D:href>
+                    \\        </D:current-user-principal>
+                    \\        <C:calendar-home-set>
+                    \\          <D:href>/calendars/
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\/</D:href>
+                    \\        </C:calendar-home-set>
+                    \\        <CARD:addressbook-home-set>
+                    \\          <D:href>/addressbooks/
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\/</D:href>
+                    \\        </CARD:addressbook-home-set>
+                    \\        <D:resourcetype>
+                    \\          <D:principal/>
+                    \\        </D:resourcetype>
+                    \\        <D:displayname>
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\</D:displayname>
+                    \\      </D:prop>
+                    \\      <D:status>HTTP/1.1 200 OK</D:status>
+                    \\    </D:propstat>
+                    \\  </D:response>
+                    \\</D:multistatus>
+                );
+            } else if (is_addressbook) {
+                // CardDAV response for addressbooks
+                try response_writer.writeAll(
+                    \\<?xml version="1.0" encoding="utf-8" ?>
+                    \\<D:multistatus xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav" xmlns:C="urn:ietf:params:xml:ns:caldav">
+                    \\  <D:response>
+                    \\    <D:href>
+                );
+                try response_writer.writeAll(path);
+                try response_writer.writeAll(
+                    \\</D:href>
+                    \\    <D:propstat>
+                    \\      <D:prop>
+                    \\        <D:current-user-principal>
+                    \\          <D:href>/principals/
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\/</D:href>
+                    \\        </D:current-user-principal>
                     \\        <D:resourcetype>
                     \\          <D:collection/>
                     \\          <CARD:addressbook/>
@@ -1061,6 +1131,13 @@ const TlsCalDavSession = struct {
                     \\          <CARD:address-data-type content-type="text/vcard" version="3.0"/>
                     \\          <CARD:address-data-type content-type="text/vcard" version="4.0"/>
                     \\        </CARD:supported-address-data>
+                    \\        <CARD:addressbook-home-set>
+                    \\          <D:href>/addressbooks/
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\/</D:href>
+                    \\        </CARD:addressbook-home-set>
                     \\      </D:prop>
                     \\      <D:status>HTTP/1.1 200 OK</D:status>
                     \\    </D:propstat>
@@ -1071,7 +1148,7 @@ const TlsCalDavSession = struct {
                 // CalDAV response for calendars
                 try response_writer.writeAll(
                     \\<?xml version="1.0" encoding="utf-8" ?>
-                    \\<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+                    \\<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
                     \\  <D:response>
                     \\    <D:href>
                 );
@@ -1080,6 +1157,13 @@ const TlsCalDavSession = struct {
                     \\</D:href>
                     \\    <D:propstat>
                     \\      <D:prop>
+                    \\        <D:current-user-principal>
+                    \\          <D:href>/principals/
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\/</D:href>
+                    \\        </D:current-user-principal>
                     \\        <D:resourcetype>
                     \\          <D:collection/>
                     \\          <C:calendar/>
@@ -1089,6 +1173,13 @@ const TlsCalDavSession = struct {
                     \\          <C:comp name="VEVENT"/>
                     \\          <C:comp name="VTODO"/>
                     \\        </C:supported-calendar-component-set>
+                    \\        <C:calendar-home-set>
+                    \\          <D:href>/calendars/
+                );
+                try response_writer.writeAll(username);
+                try response_writer.writeAll(
+                    \\/</D:href>
+                    \\        </C:calendar-home-set>
                     \\      </D:prop>
                     \\      <D:status>HTTP/1.1 200 OK</D:status>
                     \\    </D:propstat>
